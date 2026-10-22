@@ -10,8 +10,8 @@ For a given program, find out:
 
 ## 1. Sample files
 
-`python make_tt_spec_samples.py` writes them into `samples/` with `manifest.json` (the expected content) and checks
-itself (`SELFCHECK.txt`). The generator is deterministic: running it again gives the same files.
+They are in `samples/`, with `manifest.json` (the expected content). `python make_tt_spec_samples.py` writes them
+again and checks itself (`SELFCHECK.txt`); the generator is deterministic, so the files are the same.
 
 | File | Content | Used for |
 |---|---|---|

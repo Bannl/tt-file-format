@@ -8,3 +8,5 @@
 - Test kit (`kit/`): sample files generator, checker of a copy rewritten by a program (`--check`), validator of
   any TT file against the rules of the specification (`--validate`).
 - Appendix C: the alternatives considered (other carriers for per-segment data) and why iXML was chosen.
+- The three sample WAV files and their manifest are in the repository (`kit/samples/`), so a program can be tested
+  without Python.

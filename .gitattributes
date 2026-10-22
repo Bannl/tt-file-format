@@ -1,0 +1,3 @@
+# The sample files are kept byte for byte: the kit compares bytes.
+*.wav binary
+kit/samples/manifest.json -text

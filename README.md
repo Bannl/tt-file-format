@@ -31,20 +31,18 @@ It still reads the earlier form written by AudioCrucible 1.0.12 (Appendix A of t
 | Path | What it is |
 |---|---|
 | [SPEC.md](SPEC.md) | the specification |
-| [kit/](kit/) | sample files generator and checker (Python 3, standard library only), test protocol for a program |
+| [kit/](kit/) | the sample files, their generator and checker (Python 3, standard library only), test protocol for a program |
 | [RESULTS.md](RESULTS.md) | what each tested program shows, searches and keeps |
 | [CHANGELOG.md](CHANGELOG.md) | changes between drafts |
 | [LICENSE.md](LICENSE.md) | licences |
 
 ## Test your program in 10 minutes
 
-```
-python kit/make_tt_spec_samples.py
-```
+The three sample WAV files are in [kit/samples/](kit/samples/): `tt_v0_full.wav`, `tt_v0_minimal.wav` and
+`tt_v0_many.wav` (400 sounds). Load copies of them in your program and follow
+[kit/TEST_PROTOCOL.md](kit/TEST_PROTOCOL.md). This part needs no Python.
 
-This writes three sample WAV files into `kit/samples/`. Load copies of them in your program and follow
-[kit/TEST_PROTOCOL.md](kit/TEST_PROTOCOL.md). After your program has written into a copy (a metadata field, a
-marker), run:
+After your program has written into a copy (a metadata field, a marker), run (Python 3, standard library only):
 
 ```
 python kit/make_tt_spec_samples.py --check path/to/copy/tt_v0_full.wav
@@ -57,6 +55,8 @@ If your program writes TT files, check one against the rules of the specificatio
 ```
 python kit/make_tt_spec_samples.py --validate path/to/your_file.wav
 ```
+
+`python kit/make_tt_spec_samples.py` writes the sample files again (the same bytes) and checks them.
 
 ## Feedback
 
