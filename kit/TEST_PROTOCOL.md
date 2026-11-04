@@ -18,6 +18,9 @@ again and checks itself (`SELFCHECK.txt`); the generator is deterministic, so th
 | `tt_v0_full.wav` | 48 kHz / 24-bit / stereo, 7.1 s, 4 sounds and 1 marker of another program. Every candidate carrier: file-level summary (`bext`, `LIST/INFO`, iXML `USER` and `ASWG`), markers (`cue`, `labl`, `note`, `ltxt`), segment list in iXML, the same list in a dedicated chunk `ttsg`, XMP markers (`_PMX`) | A, B, C, D |
 | `tt_v0_minimal.wav` | same audio, only what the specification requires: iXML `USER` summary, markers, segment list in iXML | C on a clean file |
 | `tt_v0_many.wav` | 48 kHz / 16-bit / mono, 100 s, 400 sounds of 0.2 s | size (300 KB of iXML, 400 markers), deep search |
+| `tt_v0_full.ogg` | the audio of `tt_v0_full.wav` in Ogg Vorbis, the same 4 sounds and marker of another program (draft 0.2, section 11): summary comments, chapters, segment list in one comment | A, B, C for Ogg readers |
+| `tt_v0_full.opus` | the same in Ogg Opus (48 kHz, pre-skip) | A, B, C for Opus readers |
+| `tt_v0_many.ogg` | the audio of `tt_v0_many.wav` in Ogg Vorbis, 400 sounds: about 320 KB of comments before the audio | game engines and middleware: import and play a large comment header |
 
 The 4 sounds of `tt_v0_full.wav` (each one is a tone burst from its exact start to its exact end):
 
@@ -43,6 +46,11 @@ program reads that carrier. No word is a part of another one.
 | `zorbxmp` | keywords and comment of sound 3 in the XMP markers | the search reads XMP markers |
 | `zorbmanylabl` | marker name of sound 398 of `tt_v0_many` | marker names are read deep into a large file |
 | `zorbmanyixml` | keywords of sound 397 in the segment list of `tt_v0_many` | a large segment list is read to the end |
+| `zorboggfile` | Ogg samples: comments `DESCRIPTION`, `COMMENT` and `KEYWORDS` | the search reads the file-level comments |
+| `zorboggchap` | Ogg samples: name of the chapter of sound 3 | the search reads chapter names |
+| `zorboggtt` | Ogg samples: keywords of sound 3 in the `TT_SEGMENT_LIST` comment | the search reads the segment list |
+| `zorboggmanychap` | `tt_v0_many.ogg`: chapter name of sound 398 | chapter names are read deep into a large file |
+| `zorboggmanylist` | `tt_v0_many.ogg`: keywords of sound 397 in the segment list | a large list in a comment is read to the end |
 
 ## 3. Procedure
 
@@ -73,6 +81,12 @@ program reads that carrier. No word is a part of another one.
 Carriers: `audio` (PCM), `fmt`, `bext`, `info` (`LIST/INFO`), `ixml_file` (iXML outside the segment list: `USER`,
 `ASWG`, `SPEED`), `ixml_list` (the segment list), `ttsg` (the dedicated chunk), `xmp` (`_PMX`), `cue`, `adtl`
 (`labl`, `note`, `ltxt`), `order` (chunks that moved to the other side of `data`).
+
+Ogg files: `stream` (one logical stream, page CRCs), `audio` (the audio packets), `headers` (the identification
+and setup packets), `summary` (`TITLE`, `DESCRIPTION`, `COMMENT`, `KEYWORDS`), `chapters` (`SAME`: same times and
+names under other numbers), `list` (the `TT_SEGMENT_LIST` comment); `extra=` lists the comments the program added.
+A program that re-encodes the file changes `audio`: that is expected, but it must then update or remove the list
+(section 11.3).
 
 ## 5. Report
 

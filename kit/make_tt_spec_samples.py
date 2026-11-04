@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""make_tt_spec_samples.py: sample files for the TT File Format draft 0.1 (../SPEC.md), a checker and a validator.
+"""make_tt_spec_samples.py: sample files for the TT File Format draft 0.2 (../SPEC.md), a checker and a validator.
 
-    py -I make_tt_spec_samples.py                          writes samples/ (3 WAV + manifest.json) and SELFCHECK.txt
+    py -I make_tt_spec_samples.py                          writes samples/ (3 WAV, 3 Ogg, manifest.json) and SELFCHECK.txt
     py -I make_tt_spec_samples.py --check FILE [--as NAME] compares a copy that went through another program
-    py -I make_tt_spec_samples.py --validate FILE          checks ANY TT file against the rules of the specification
+    py -I make_tt_spec_samples.py --validate FILE          checks ANY TT file (WAV or Ogg) against the specification
+    py -I make_tt_spec_samples.py --make-ogg-audio         kit maintainers only: encodes ogg_audio/ again (needs ffmpeg)
+
+The Ogg samples are made from the encoded audio in ogg_audio/ (Vorbis and Opus, encoded once with ffmpeg from the
+WAV samples): the kit only rewrites their comment header, so it still needs nothing but Python.
 
 Each candidate carrier of the segment data holds its own search word, so that a search in a library tool tells
 which carrier it indexes (see TEST_PROTOCOL.md). Python standard library only; writes only inside the
@@ -45,6 +49,17 @@ FULL = "tt_v0_full.wav"
 MINIMAL = "tt_v0_minimal.wav"
 MANY = "tt_v0_many.wav"
 
+OGG_SPEC_VERSION = "0.2"                 # Ogg files are defined from draft 0.2 (WAV samples stay 0.1: unchanged)
+OGG_WRITER = "TT spec sample kit 2026-11-04"
+OGG_AUDIO_DIR = os.path.join(HERE, "ogg_audio")
+OGG_FULL = "tt_v0_full.ogg"
+OPUS_FULL = "tt_v0_full.opus"
+OGG_MANY = "tt_v0_many.ogg"
+# (sample, segments of, encoded audio in ogg_audio/, TITLE, ORIGIN conversion)
+OGG_SAMPLES = [(OGG_FULL, "full", "full_vorbis.ogg", "TT Doors", ("lossy", "PCM to Vorbis")),
+               (OPUS_FULL, "full", "full_opus.opus", "TT Doors", ("lossy", "PCM to Opus")),
+               (OGG_MANY, "many", "many_vorbis.ogg", "TT Impacts", ("lossy", "PCM to Vorbis"))]
+
 TOKENS = {
     "file": "zorbfile",          # file-level summary only (bext, LIST/INFO, iXML USER and ASWG)
     "labl": "zorblabl",          # one labl only (segment 3)
@@ -54,10 +69,17 @@ TOKENS = {
     "xmp": "zorbxmp",            # the XMP markers only (segment 3 keywords and comment)
     "many_list": "zorbmanyixml", # tt_v0_many.wav: segment 397, segment list only
     "many_labl": "zorbmanylabl", # tt_v0_many.wav: segment 398, labl only
+    "ogg_file": "zorboggfile",   # Ogg samples: summary comments only (DESCRIPTION, COMMENT, KEYWORDS)
+    "ogg_chapter": "zorboggchap",  # Ogg samples: one chapter name only (segment 3)
+    "ogg_list": "zorboggtt",     # Ogg samples: the TT_SEGMENT_LIST comment only (segment 3 keywords)
+    "ogg_many_list": "zorboggmanylist",  # tt_v0_many.ogg: segment 397, segment list only
+    "ogg_many_chap": "zorboggmanychap",  # tt_v0_many.ogg: segment 398, chapter name only
 }
 # No word is a prefix or a part of another one: a search for one never finds the carrier of another.
 
 CARRIERS = ["audio", "fmt", "bext", "info", "ixml_file", "ixml_list", "ttsg", "xmp", "cue", "adtl", "order"]
+OGG_CARRIERS = ["stream", "audio", "headers", "summary", "chapters", "list"]
+OGG_SUMMARY_KEYS = ["TITLE", "DESCRIPTION", "COMMENT", "KEYWORDS"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -243,13 +265,18 @@ def el(tag, text):
     return "<%s>%s</%s>" % (tag, xml_escape(str(text)), tag)
 
 
-def segment_lines(s, variant, rich):
+def segment_lines(s, variant, rich, cue_id=None, conversion=None):
+    """`variant` ("ixml", "chunk" or "ogg") picks the search word of segment 3; `cue_id` and `conversion`
+    ((CONVERSION, CONVERSION_NOTE)) replace the segment's own values when given (Ogg samples)."""
     kw = s["kw"]
     if s["n"] == 3 and rich:
-        kw += ", " + TOKENS["ixml" if variant == "ixml" else "chunk"]
+        kw += ", " + TOKENS[{"ixml": "ixml", "chunk": "chunk", "ogg": "ogg_list"}[variant]]
     if variant == "ixml" and s.get("kw_list_extra"):
         kw += ", " + s["kw_list_extra"]
-    lines = ["<TT_SEGMENT>", el("SEGMENT_ID", s["uid"]), el("CUE_ID", s["cue_id"]), el("START_SAMPLE", s["start"]),
+    if variant == "ogg" and s.get("kw_ogg_extra"):
+        kw += ", " + s["kw_ogg_extra"]
+    lines = ["<TT_SEGMENT>", el("SEGMENT_ID", s["uid"]), el("CUE_ID", s["cue_id"] if cue_id is None else cue_id),
+             el("START_SAMPLE", s["start"]),
              el("LENGTH_SAMPLES", s["length"]), el("NAME", s["name"]), "<USER>",
              el("CATID", s["catid"]), el("CATEGORY", s["category"]), el("SUBCATEGORY", s["sub"]),
              el("CATEGORYFULL", s["categoryfull"]), el("FXNAME", s["fx"]), el("DESCRIPTION", s["desc"]),
@@ -265,10 +292,11 @@ def segment_lines(s, variant, rich):
     lines += ["<ORIGIN>", el("FILENAME", s["src_file"]), el("START_SAMPLE", 0), el("LENGTH_SAMPLES", s["length"]),
               el("SAMPLE_RATE", SR)]
     if rich:
+        conv, note = conversion or (s["conversion"], "16 bits to 24 bits" if s["conversion"] == "exact" else None)
         lines += [el("BIT_DEPTH", s["bits"]), el("CHANNELS", 2), el("FORMAT", "wav"),
-                  el("TIME_REFERENCE", s["src_tref"]), el("CONVERSION", s["conversion"])]
-        if s["conversion"] == "exact":
-            lines.append(el("CONVERSION_NOTE", "16 bits to 24 bits"))
+                  el("TIME_REFERENCE", s["src_tref"]), el("CONVERSION", conv)]
+        if note:
+            lines.append(el("CONVERSION_NOTE", note))
         if s["n"] == 1:
             src_bext = bext_body("Original recording of a door slam", "SRC-0001", s["src_tref"],
                                  "A=PCM,F=48000,W=24,M=stereo\r\n")
@@ -282,16 +310,17 @@ def segment_lines(s, variant, rich):
     return lines
 
 
-def segment_list_lines(segs, total, audio_sha, variant, rich):
-    lines = ["<TT_SEGMENT_LIST>", el("TT_VERSION", SPEC_VERSION), el("WRITER", WRITER), el("SAMPLE_RATE", SR),
+def segment_list_lines(segs, total, audio_sha, variant, rich, version=SPEC_VERSION, writer=WRITER, rate=SR,
+                       cue_ids=None, conversion=None):
+    lines = ["<TT_SEGMENT_LIST>", el("TT_VERSION", version), el("WRITER", writer), el("SAMPLE_RATE", rate),
              el("TOTAL_FRAMES", total), el("AUDIO_SHA256", audio_sha), el("SEGMENT_COUNT", len(segs))]
     for s in segs:
-        lines += segment_lines(s, variant, rich)
+        lines += segment_lines(s, variant, rich, None if cue_ids is None else cue_ids.get(s["uid"], 0), conversion)
     lines.append("</TT_SEGMENT_LIST>")
     return lines
 
 
-def summary(segs):
+def summary(segs, token_key="file"):
     names = ", ".join(s["fx"] for s in segs)
     keywords = []
     for s in segs:
@@ -299,7 +328,7 @@ def summary(segs):
             k = k.strip()
             if k and k not in keywords:
                 keywords.append(k)
-    return "%d sounds: %s. %s" % (len(segs), names, TOKENS["file"]), ", ".join(keywords + [TOKENS["file"]])
+    return "%d sounds: %s. %s" % (len(segs), names, TOKENS[token_key]), ", ".join(keywords + [TOKENS[token_key]])
 
 
 def ixml_document(segs, total, audio_sha, rich, with_list=True, fxname="TT Doors"):
@@ -636,8 +665,9 @@ def describe(data, segs, foreign, xmp_expected):
 # ---------------------------------------------------------------------------------------------
 
 class Report:
-    def __init__(self, title):
-        self.title, self.lines, self.status = title, [], {c: "n/a" for c in CARRIERS}
+    def __init__(self, title, carriers=None):
+        self.carriers = carriers or CARRIERS
+        self.title, self.lines, self.status = title, [], {c: "n/a" for c in self.carriers}
         self.extra = []
 
     def set(self, carrier, status, detail=""):
@@ -648,7 +678,7 @@ class Report:
         self.lines.append("       " + text)
 
     def summary_line(self):
-        parts = ["%s=%s" % (c, self.status[c]) for c in CARRIERS]
+        parts = ["%s=%s" % (c, self.status[c]) for c in self.carriers]
         parts.append("extra=%s" % (",".join(self.extra) if self.extra else "none"))
         return "RESUME " + " ".join(parts)
 
@@ -878,16 +908,512 @@ def check_bytes(data, entry, title):
     return rep
 
 
+# ---------------------------------------------------------------------------------------------
+# Ogg files (draft 0.2, SPEC.md section 11): Vorbis comments carry the summary, the chapters and the list
+# ---------------------------------------------------------------------------------------------
+
+def _ogg_crc_table():
+    table = []
+    for i in range(256):
+        r = i << 24
+        for _ in range(8):
+            r = ((r << 1) ^ 0x04C11DB7) if r & 0x80000000 else (r << 1)
+        table.append(r & 0xFFFFFFFF)
+    return table
+
+
+OGG_CRC_TABLE = _ogg_crc_table()
+
+
+def ogg_crc(data):
+    """CRC-32 of an Ogg page (polynomial 0x04C11DB7, initial value 0, not reflected)."""
+    crc, table = 0, OGG_CRC_TABLE
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[(crc >> 24) ^ b]
+    return crc
+
+
+def ogg_page(htype, granule, serial, seq, lacing, body):
+    page = (b"OggS" + bytes([0, htype]) + struct.pack("<qIII", granule, serial, seq, 0) + bytes([len(lacing)])
+            + bytes(lacing) + body)
+    return page[:22] + struct.pack("<I", ogg_crc(page)) + page[26:]
+
+
+def ogg_renumber(raw, seq):
+    """The same page with another sequence number (and its CRC)."""
+    page = raw[:18] + struct.pack("<I", seq) + b"\x00\x00\x00\x00" + raw[26:]
+    return page[:22] + struct.pack("<I", ogg_crc(page)) + page[26:]
+
+
+def ogg_lacing(size):
+    return [255] * (size // 255) + [size % 255]
+
+
+def parse_ogg_comments(pkt, magic):
+    """Comment header -> (vendor bytes, ["FIELD=value", ...])."""
+    if not pkt.startswith(magic):
+        raise ValueError("comment header not found")
+    pos, comments = len(magic), []
+    try:
+        (n,) = struct.unpack("<I", pkt[pos:pos + 4])
+        vendor = pkt[pos + 4:pos + 4 + n]
+        pos += 4 + n
+        (count,) = struct.unpack("<I", pkt[pos:pos + 4])
+        pos += 4
+        for _ in range(count):
+            (n,) = struct.unpack("<I", pkt[pos:pos + 4])
+            if pos + 4 + n > len(pkt):
+                raise ValueError("comment beyond the header")
+            comments.append(pkt[pos + 4:pos + 4 + n].decode("utf-8", "replace"))
+            pos += 4 + n
+    except struct.error:
+        raise ValueError("malformed comment header")
+    return vendor, comments
+
+
+def build_ogg_comments(magic, vendor, comments):
+    out = bytearray(magic + struct.pack("<I", len(vendor)) + vendor + struct.pack("<I", len(comments)))
+    for c in comments:
+        b = c.encode("utf-8")
+        out += struct.pack("<I", len(b)) + b
+    if magic == b"\x03vorbis":
+        out += b"\x01"                                # Vorbis framing bit
+    return bytes(out)
+
+
+def read_ogg(data):
+    """Pages, packets [(bytes, index of the page where it ends)], codec facts and the comments of an Ogg Vorbis or
+    Opus file. Frames: decoded samples per channel (Opus: at 48 kHz, after the pre-skip). ValueError otherwise."""
+    pages, pos = [], 0
+    while pos < len(data):
+        if data[pos:pos + 4] != b"OggS" or len(data) < pos + 27:
+            raise ValueError("no Ogg page at byte %d" % pos)
+        htype = data[pos + 5]
+        granule, serial, seq, crc = struct.unpack("<qIII", data[pos + 6:pos + 26])
+        nseg = data[pos + 26]
+        lacing = data[pos + 27:pos + 27 + nseg]
+        start = pos + 27 + nseg
+        end = start + sum(lacing)
+        if len(lacing) != nseg or end > len(data):
+            raise ValueError("truncated Ogg page at byte %d" % pos)
+        raw = data[pos:end]
+        pages.append(dict(htype=htype, granule=granule, serial=serial, seq=seq, lacing=lacing,
+                          body=data[start:end], raw=raw,
+                          crc_ok=ogg_crc(raw[:22] + b"\x00\x00\x00\x00" + raw[26:]) == crc))
+        pos = end
+    if not pages:
+        raise ValueError("empty file")
+    first_serial = pages[0]["serial"]
+    packets, cur = [], bytearray()
+    for i, p in enumerate(pages):
+        if p["serial"] != first_serial:
+            continue
+        off = 0
+        for lv in p["lacing"]:
+            cur += p["body"][off:off + lv]
+            off += lv
+            if lv < 255:
+                packets.append((bytes(cur), i))
+                cur = bytearray()
+    if not packets:
+        raise ValueError("no packet")
+    head = packets[0][0]
+    if head.startswith(b"\x01vorbis") and len(head) >= 16:
+        codec, nhead, magic, channels = "vorbis", 3, b"\x03vorbis", head[11]
+        rate, preskip = struct.unpack("<I", head[12:16])[0], 0
+    elif head.startswith(b"OpusHead") and len(head) >= 19:
+        codec, nhead, magic, channels = "opus", 2, b"OpusTags", head[9]
+        rate, preskip = 48000, struct.unpack("<H", head[10:12])[0]
+    else:
+        raise ValueError("neither Ogg Vorbis nor Ogg Opus")
+    if len(packets) < nhead:
+        raise ValueError("header packets missing")
+    vendor, comments = parse_ogg_comments(packets[1][0], magic)
+    granules = [p["granule"] for p in pages if p["serial"] == first_serial and p["granule"] >= 0]
+    audio, heads = hashlib.sha256(), hashlib.sha256(packets[0][0] + (packets[2][0] if codec == "vorbis" else b""))
+    for pkt, _i in packets[nhead:]:
+        audio.update(pkt)
+    return dict(pages=pages, packets=packets, codec=codec, nhead=nhead, magic=magic, rate=rate, channels=channels,
+                preskip=preskip, total=(granules[-1] - preskip) if granules else 0,
+                serials=sorted(set(p["serial"] for p in pages)), crc_errors=sum(1 for p in pages if not p["crc_ok"]),
+                vendor=vendor, comments=comments, audio_sha256=audio.hexdigest(), headers_sha256=heads.hexdigest(),
+                unfinished=len(cur))
+
+
+def comment_map(comments):
+    """["FIELD=value"] -> {FIELD in upper case: [values in order]} (field names are case-insensitive)."""
+    out = {}
+    for c in comments:
+        key, sep, value = c.partition("=")
+        if sep:
+            out.setdefault(key.upper(), []).append(value)
+    return out
+
+
+def is_chapter_key(key):
+    rest = key[7:] if key.startswith("CHAPTER") else ""
+    return rest.isdigit() or (rest.endswith("NAME") and rest[:-4].isdigit())
+
+
+def ogg_chapters(cm):
+    """{"001": [time, name]} from the CHAPTERnnn / CHAPTERnnnNAME comments."""
+    out = {}
+    for key, values in cm.items():
+        rest = key[7:] if key.startswith("CHAPTER") else ""
+        if rest.isdigit():
+            out.setdefault(rest, ["", ""])[0] = values[0]
+        elif rest.endswith("NAME") and rest[:-4].isdigit():
+            out.setdefault(rest[:-4], ["", ""])[1] = values[0]
+    return out
+
+
+def chapter_time(frames, rate):
+    ms = int(round(frames * 1000.0 / rate))
+    h, rest = divmod(ms, 3600000)
+    m, rest = divmod(rest, 60000)
+    s, ms = divmod(rest, 1000)
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+
+def paginate_headers(packets, max_segments=255):
+    """Pages of header packets: (header type, granule, lacing, body). A packet may continue on the next page;
+    granule 0 on a page where a packet ends, -1 on the others."""
+    segs = []
+    for pkt in packets:
+        lac = ogg_lacing(len(pkt))
+        segs += [(lv, k == len(lac) - 1) for k, lv in enumerate(lac)]
+    stream, pages, i, off, continued = b"".join(packets), [], 0, 0, False
+    while i < len(segs):
+        part = segs[i:i + max_segments]
+        size = sum(lv for lv, _end in part)
+        pages.append((0x01 if continued else 0x00, 0 if any(end for _lv, end in part) else -1,
+                      [lv for lv, _end in part], stream[off:off + size]))
+        continued = not part[-1][1]
+        i += max_segments
+        off += size
+    return pages
+
+
+def ogg_with_comments(data, comments, max_segments=255):
+    """The same stream with a new comment header: identification packet, Vorbis setup packet and every audio page
+    kept byte for byte; the header pages are rebuilt, then every page renumbered with its CRC."""
+    info = read_ogg(data)
+    pages, packets, nhead = info["pages"], info["packets"], info["nhead"]
+    if len(info["serials"]) != 1:
+        raise ValueError("more than one logical stream")
+    last_head = packets[nhead - 1][1]
+    if sum(len(p["body"]) for p in pages[:last_head + 1]) != sum(len(pkt) for pkt, _i in packets[:nhead]):
+        raise ValueError("audio data shares a page with the header packets")
+    serial = pages[0]["serial"]
+    heads = [build_ogg_comments(info["magic"], info["vendor"], comments)]
+    if info["codec"] == "vorbis":
+        heads.append(packets[2][0])
+    out = [ogg_page(0x02, 0, serial, 0, ogg_lacing(len(packets[0][0])), packets[0][0])]
+    for htype, granule, lacing, body in paginate_headers(heads, max_segments):
+        out.append(ogg_page(htype, granule, serial, len(out), lacing, body))
+    for p in pages[last_head + 1:]:
+        out.append(ogg_renumber(p["raw"], len(out)))
+    return b"".join(out)
+
+
+def ogg_flip_audio_byte(data):
+    """Self-check helper: one byte of the first audio page changed, its CRC fixed."""
+    info = read_ogg(data)
+    k = info["packets"][info["nhead"]][1]
+    p = info["pages"][k]
+    raw = bytearray(p["raw"])
+    raw[len(raw) - len(p["body"]) // 2 - 1] ^= 0x01
+    page = bytes(raw[:22]) + b"\x00\x00\x00\x00" + bytes(raw[26:])
+    off = sum(len(q["raw"]) for q in info["pages"][:k])
+    return data[:off] + page[:22] + struct.pack("<I", ogg_crc(page)) + page[26:] + data[off + len(raw):]
+
+
+def ogg_segments(key, fsegs, msegs):
+    """Copies of the WAV samples' segments with the Ogg search words -> (segments, rich, foreign marker)."""
+    if key == "full":
+        segs = [dict(s) for s in fsegs]
+        segs[2]["chapter_token"] = TOKENS["ogg_chapter"]
+        return segs, True, FOREIGN
+    segs = [dict(s) for s in msegs]
+    segs[396]["kw_ogg_extra"] = TOKENS["ogg_many_list"]
+    segs[397]["chapter_token"] = TOKENS["ogg_many_chap"]
+    return segs, False, None
+
+
+def ogg_tt_comments(segs, total, rate, audio_sha, rich, title, foreign=None, conversion=None):
+    """Comments of an Ogg sample (section 11): summary, chapters of every marker in time order (CUE_ID = chapter
+    number), then the segment list on one line."""
+    marks = sorted([(s["start"], 1, s) for s in segs] + ([(foreign["position"], 0, None)] if foreign else []),
+                   key=lambda m: (m[0], m[1]))
+    chapters, cue_ids = [], {}
+    for num, (pos, _kind, s) in enumerate(marks, start=1):
+        if s is None:
+            name = foreign["label"]
+        else:
+            name = s["fx"] + ((" " + s["chapter_token"]) if s.get("chapter_token") else "")
+            cue_ids[s["uid"]] = num
+        chapters.append(("%03d" % num, chapter_time(pos, rate), name))
+    desc, keywords = summary(segs, "ogg_file")
+    lst = "".join(segment_list_lines(segs, total, audio_sha, "ogg", rich, OGG_SPEC_VERSION, OGG_WRITER, rate,
+                                     cue_ids, conversion))
+    comments = ["TITLE=" + title, "DESCRIPTION=" + desc, "COMMENT=" + desc, "KEYWORDS=" + keywords]
+    for num, t, name in chapters:
+        comments += ["CHAPTER%s=%s" % (num, t), "CHAPTER%sNAME=%s" % (num, name)]
+    comments.append("TT_SEGMENT_LIST=" + lst)
+    return comments
+
+
+def describe_ogg(data):
+    info = read_ogg(data)
+    cm = comment_map(info["comments"])
+    text = cm["TT_SEGMENT_LIST"][0]
+    return dict(kind="ogg", codec=info["codec"], rate=info["rate"], channels=info["channels"],
+                preskip=info["preskip"], frames=info["total"], audio_sha256=info["audio_sha256"],
+                headers_sha256=info["headers_sha256"], comment_keys=sorted(cm),
+                summary={k: cm[k][0] for k in OGG_SUMMARY_KEYS if k in cm}, chapters=ogg_chapters(cm),
+                list_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(), list=canon_list(ET.fromstring(text)))
+
+
+def check_ogg_bytes(data, entry, title):
+    rep = Report(title, OGG_CARRIERS)
+    try:
+        info = read_ogg(data)
+    except ValueError as e:
+        rep.set("stream", "LOST", str(e))
+        return rep
+    problems = []
+    if len(info["serials"]) != 1:
+        problems.append("%d logical streams" % len(info["serials"]))
+    if info["crc_errors"]:
+        problems.append("%d page(s) with a wrong CRC" % info["crc_errors"])
+    rep.set("stream", "CHANGED" if problems else "OK", "; ".join(problems))
+    same_audio = info["audio_sha256"] == entry["audio_sha256"]
+    rep.set("audio", "OK" if same_audio else "CHANGED", "" if same_audio else "audio packets differ (re-encoded?)")
+    rep.set("headers", "OK" if info["headers_sha256"] == entry["headers_sha256"] else "CHANGED")
+    cm = comment_map(info["comments"])
+    rep.extra = sorted(k for k in cm if k not in entry["comment_keys"] and not is_chapter_key(k))   # chapters: below
+
+    found = {k: cm[k][0] for k in OGG_SUMMARY_KEYS if k in cm}
+    if not found:
+        rep.set("summary", "LOST")
+    else:
+        rep.set("summary", "OK" if compare_dict(entry["summary"], found, "comment", rep) else "CHANGED")
+
+    chapters = ogg_chapters(cm)
+    if not chapters:
+        rep.set("chapters", "LOST")
+    elif chapters == entry["chapters"]:
+        rep.set("chapters", "OK")
+    elif sorted(map(tuple, chapters.values())) == sorted(map(tuple, entry["chapters"].values())):
+        rep.set("chapters", "SAME", "same times and names, other numbers")
+    else:
+        compare_dict({k: tuple(v) for k, v in entry["chapters"].items()}, {k: tuple(v) for k, v in chapters.items()},
+                     "chapter", rep)
+        rep.set("chapters", "CHANGED")
+
+    found_list, values = None, cm.get("TT_SEGMENT_LIST", [])
+    if not values:
+        rep.set("list", "LOST")
+    elif len(values) > 1:
+        rep.set("list", "CHANGED", "%d TT_SEGMENT_LIST comments" % len(values))
+    else:
+        try:
+            found_list = canon_list(ET.fromstring(values[0]))
+        except ET.ParseError as e:
+            rep.set("list", "CHANGED", "the list no longer parses: %s" % e)
+        else:
+            if hashlib.sha256(values[0].encode("utf-8")).hexdigest() == entry["list_sha256"]:
+                rep.set("list", "OK")
+            else:
+                rep.set("list", "SAME" if compare_list(entry["list"], found_list, rep, "list") else "CHANGED")
+
+    # integrity rules of the spec (section 11.3), on the list as found
+    if found_list is not None:
+        h = found_list["header"]
+        if h.get("TOTAL_FRAMES") != str(info["total"]):
+            rep.info("spec check: TOTAL_FRAMES %s but the stream decodes to %d frames" % (h.get("TOTAL_FRAMES"), info["total"]))
+        if h.get("AUDIO_SHA256") and h["AUDIO_SHA256"] != info["audio_sha256"]:
+            rep.info("spec check: AUDIO_SHA256 no longer matches the audio packets: segments may be wrong")
+        moved = 0
+        for s in found_list["segments"]:
+            cid, start = s.get("CUE_ID#0", ""), s.get("START_SAMPLE#0", "")
+            ch = chapters.get("%03d" % int(cid)) if cid.isdigit() and cid != "0" else None
+            if ch and start.isdigit() and ch[0] != chapter_time(int(start), info["rate"]):
+                moved += 1
+        if moved:
+            rep.info("spec check: %d segment(s) whose chapter is not at START_SAMPLE (moved by a program)" % moved)
+    return rep
+
+
+def validate_ogg(path, data):
+    """Spec checks for an Ogg TT file (section 11). 0 = no FAIL."""
+    lines, counts = [], {"fail": 0, "warn": 0}
+
+    def ok(msg):
+        lines.append("[OK]   " + msg)
+
+    def bad(msg):
+        counts["fail"] += 1
+        lines.append("[FAIL] " + msg)
+
+    def warn(msg):
+        counts["warn"] += 1
+        lines.append("[WARN] " + msg)
+
+    def finish():
+        print("== validate %s" % path)
+        print("\n".join(lines))
+        print("RESULT %s (%d fail, %d warning)" % ("PASS" if counts["fail"] == 0 else "FAIL", counts["fail"], counts["warn"]))
+        return 1 if counts["fail"] else 0
+
+    try:
+        info = read_ogg(data)
+    except ValueError as e:
+        bad(str(e))
+        return finish()
+    rate, total = info["rate"], info["total"]
+    ok("Ogg %s, %d Hz decoded, %d channel(s), %d frames%s" % (info["codec"], rate, info["channels"], total,
+       (", pre-skip %d" % info["preskip"]) if info["codec"] == "opus" else ""))
+    if len(info["serials"]) != 1:
+        bad("%d logical streams (one only: no chaining, no multiplexing, section 11.1)" % len(info["serials"]))
+    if info["crc_errors"]:
+        bad("%d page(s) with a wrong CRC" % info["crc_errors"])
+    if info["unfinished"]:
+        warn("the stream ends in the middle of a packet")
+    cm = comment_map(info["comments"])
+    values = cm.get("TT_SEGMENT_LIST", [])
+    if not values:
+        bad("no TT_SEGMENT_LIST comment")
+        return finish()
+    if len(values) > 1:
+        bad("%d TT_SEGMENT_LIST comments (at most one, section 11.2)" % len(values))
+    if "\n" in values[0] or "\r" in values[0]:
+        warn("the TT_SEGMENT_LIST value has line breaks (it SHOULD be one line, section 11.2)")
+    try:
+        listel = ET.fromstring(values[0])
+    except ET.ParseError as e:
+        bad("the TT_SEGMENT_LIST value does not parse: %s" % e)
+        return finish()
+    if listel.tag != "TT_SEGMENT_LIST":
+        bad("the TT_SEGMENT_LIST value is a <%s> element" % listel.tag)
+        return finish()
+    canon = canon_list(listel)
+    h, segs = canon["header"], canon["segments"]
+    version = h.get("TT_VERSION", "")
+    if not version:
+        bad("TT_VERSION missing")
+    elif version != OGG_SPEC_VERSION:
+        warn("TT_VERSION %s (Ogg files are defined from draft %s)" % (version, OGG_SPEC_VERSION))
+    else:
+        ok("TT_VERSION " + version)
+    (ok if h.get("SAMPLE_RATE") == str(rate) else bad)("SAMPLE_RATE %s (decoded %d Hz)" % (h.get("SAMPLE_RATE"), rate))
+    (ok if h.get("TOTAL_FRAMES") == str(total) else bad)("TOTAL_FRAMES %s (stream %d frames)" % (h.get("TOTAL_FRAMES"), total))
+    (ok if h.get("SEGMENT_COUNT") == str(len(segs)) else bad)("SEGMENT_COUNT %s (%d TT_SEGMENT)" % (h.get("SEGMENT_COUNT"), len(segs)))
+    sha = h.get("AUDIO_SHA256", "")
+    if not sha:
+        warn("no AUDIO_SHA256 (recommended, section 11.3)")
+    elif len(sha) != 64 or any(ch not in "0123456789abcdefABCDEF" for ch in sha):
+        bad("AUDIO_SHA256 is not a SHA-256: %s" % sha[:70])
+    elif sha.lower() != info["audio_sha256"]:
+        bad("AUDIO_SHA256 does not match the audio packets (re-encoded after the list was written?)")
+    else:
+        ok("AUDIO_SHA256 matches the audio packets")
+
+    chapters = ogg_chapters(cm)
+    seen, prev, broken = set(), -1, 0
+    for i, s in enumerate(segs, 1):
+        sid, problems = s.get("SEGMENT_ID#0", ""), []
+        if not sid:
+            problems.append("no SEGMENT_ID")
+        elif sid in seen:
+            problems.append("SEGMENT_ID used twice")
+        seen.add(sid)
+        try:
+            start, length = int(s.get("START_SAMPLE#0", "")), int(s.get("LENGTH_SAMPLES#0", ""))
+        except ValueError:
+            start = length = None
+            problems.append("START_SAMPLE / LENGTH_SAMPLES are not whole numbers")
+        if start is not None:
+            if length < 1:
+                problems.append("LENGTH_SAMPLES below 1")
+            if start < 0 or start + length > total:
+                problems.append("outside the audio")
+            if start < prev:
+                problems.append("not in ascending START_SAMPLE order")
+            prev = start
+        if not s.get("NAME#0"):
+            problems.append("no NAME")
+        cid = s.get("CUE_ID#0", "")
+        if not cid.isdigit():
+            problems.append("CUE_ID missing")
+        elif int(cid) > 0 and start is not None:
+            ch = chapters.get("%03d" % int(cid))
+            if ch is None:
+                problems.append("chapter %03d missing" % int(cid))
+            else:
+                if ch[0] != chapter_time(start, rate):
+                    problems.append("chapter %03d at %s, START_SAMPLE is %s" % (int(cid), ch[0], chapter_time(start, rate)))
+                if not ch[1]:
+                    problems.append("chapter %03d has no NAME" % int(cid))
+        for key, value in s.items():
+            if key.endswith("DATA_BASE64#0"):
+                try:
+                    base64.b64decode(value, validate=True)
+                except Exception:                          # noqa: BLE001 (report, do not stop)
+                    problems.append("an ORIGIN chunk is not valid base64")
+        if problems:
+            broken += 1
+            bad("segment %d (%s): %s" % (i, sid[:13], "; ".join(problems)))
+    if broken == 0:
+        ok("%d segment(s): ids, ranges, names and chapters" % len(segs))
+    if len(chapters) > 999 or any(len(k) != 3 for k in chapters):
+        warn("chapter numbers SHOULD have three digits, 001 to 999 (section 11.2)")
+    desc = (cm.get("DESCRIPTION") or cm.get("COMMENT") or [""])[0]
+    missing = [s.get("USER#0/FXNAME#0") for s in segs if s.get("USER#0/FXNAME#0") and s.get("USER#0/FXNAME#0") not in desc]
+    if missing:
+        warn("the DESCRIPTION comment does not name %d segment(s) (sections 7 and 11.2), first: %s" % (len(missing), missing[0]))
+    elif segs:
+        ok("the DESCRIPTION comment names every segment")
+    return finish()
+
+
+def make_ogg_audio():
+    """Kit maintainers only: encodes the audio of the WAV samples into ogg_audio/ (ffmpeg with libvorbis and
+    libopus). The Ogg samples are then made from these files by the kit itself."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("--make-ogg-audio needs ffmpeg on the PATH (kit maintainers only)")
+        return 2
+    os.makedirs(OGG_AUDIO_DIR, exist_ok=True)
+    jobs = [(FULL, "full_vorbis.ogg", ["-c:a", "libvorbis", "-q:a", "4"]),
+            (FULL, "full_opus.opus", ["-c:a", "libopus", "-b:a", "96k"]),
+            (MANY, "many_vorbis.ogg", ["-c:a", "libvorbis", "-q:a", "1"])]
+    code = 0
+    for src, dst, codec in jobs:
+        cmd = ([ffmpeg, "-v", "error", "-y", "-i", os.path.join(OUT_DIR, src), "-map_metadata", "-1",
+                "-map_chapters", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact"] + codec
+               + [os.path.join(OGG_AUDIO_DIR, dst)])
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        print("%s -> ogg_audio/%s: exit %d %s" % (src, dst, r.returncode, r.stderr.strip()[:200]))
+        code = code or r.returncode
+    return code
+
+
 def check_file(path, as_name=None):
     with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
         man = json.load(f)
     name = as_name or os.path.basename(path)
     entry = man["files"].get(name)
     if entry is None:
-        print("Unknown file name %r: add --as %s (or %s, %s)" % (name, FULL, MINIMAL, MANY))
+        print("Unknown file name %r: add --as with one of %s" % (name, ", ".join(sorted(man["files"]))))
         return 2
     with open(path, "rb") as f:
         data = f.read()
+    if entry.get("kind") == "ogg":
+        rep = check_ogg_bytes(data, entry, "%s (as %s)" % (path, name))
+        print(rep.text())
+        bad = [c for c, s in rep.status.items() if s in ("CHANGED", "LOST")]
+        return 1 if bad or rep.extra else 0
     rep = check_bytes(data, entry, "%s (as %s)" % (path, name))
     print(rep.text())
     bad = [c for c, s in rep.status.items() if s in ("CHANGED", "LOST")]
@@ -902,6 +1428,8 @@ def validate_file(path):
     """Spec checks: structure, list header, segments, mirrored markers, audio hash, summary. 0 = no FAIL."""
     with open(path, "rb") as f:
         data = f.read()
+    if data[:4] == b"OggS":
+        return validate_ogg(path, data)
     lines, counts = [], {"fail": 0, "warn": 0}
 
     def ok(msg):
@@ -1062,16 +1590,34 @@ def generate(use_ffprobe=True):
     files = {FULL: (build_full(fpcm, fsegs, ftotal), fsegs, FOREIGN, xmp_markers_expected(fsegs)),
              MINIMAL: (build_minimal(fpcm, fsegs, ftotal), fsegs, None, None),
              MANY: (build_many(mpcm, msegs, mtotal), msegs, None, None)}
-    man = dict(spec=SPEC_VERSION, writer=WRITER, tokens=TOKENS, files={})
+    man = dict(spec=OGG_SPEC_VERSION, writer=WRITER, tokens=TOKENS, files={})
     for name, (data, segs, foreign, xmp_exp) in files.items():
         with open(os.path.join(OUT_DIR, name), "wb") as f:
             f.write(data)
         man["files"][name] = describe(data, segs, foreign, xmp_exp)
         log.append("written %s: %d bytes, %d segments" % (name, len(data), len(segs)))
+    # Ogg samples: the encoded audio of ogg_audio/ with the comments of section 11
+    ogg_files, failures = {}, 0
+    for name, key, base, title, conversion in OGG_SAMPLES:
+        base_path = os.path.join(OGG_AUDIO_DIR, base)
+        if not os.path.exists(base_path):
+            failures += 1
+            log.append("ogg_audio/%s missing (kit maintainers: --make-ogg-audio)   <-- FAILED" % base)
+            continue
+        with open(base_path, "rb") as f:
+            base_data = f.read()
+        info = read_ogg(base_data)
+        segs, rich, foreign = ogg_segments(key, fsegs, msegs)
+        data = ogg_with_comments(base_data, ogg_tt_comments(segs, info["total"], info["rate"], info["audio_sha256"],
+                                                             rich, title, foreign, conversion))
+        with open(os.path.join(OUT_DIR, name), "wb") as f:
+            f.write(data)
+        man["files"][name] = describe_ogg(data)
+        ogg_files[name] = (data, ftotal if key == "full" else mtotal)
+        log.append("written %s: %d bytes, %d segments" % (name, len(data), len(segs)))
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(man, f, ensure_ascii=False, indent=1)
 
-    failures = 0
     # 1. every sample checks clean
     for name in files:
         with open(os.path.join(OUT_DIR, name), "rb") as f:
@@ -1152,10 +1698,76 @@ def generate(use_ffprobe=True):
         failures += 0 if ok else 1
         log.append("search word %-12s in %s %s" % (TOKENS[token_key], ", ".join(holders), "OK" if ok else "FAILED"))
 
-    # 4. optional: ffprobe reads the markers as chapters
+    # 4. Ogg samples (draft 0.2): clean check, validator, decoded length, rewrites, search words
+    for name, (data, model_total) in ogg_files.items():
+        rep = check_ogg_bytes(data, man["files"][name], name)
+        bad = [c for c, s in rep.status.items() if s not in ("OK", "n/a")]
+        log.append(rep.summary_line() + ("" if not bad and not rep.extra else "   <-- FAILED"))
+        failures += 1 if bad or rep.extra else 0
+        for line in rep.lines:
+            if "spec check" in line:
+                log.append("   " + line.strip())
+                failures += 1
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = validate_file(os.path.join(OUT_DIR, name))
+        result = [l for l in buf.getvalue().splitlines() if l.startswith("RESULT")]
+        log.append("validate %s: %s" % (name, result[0] if result else "no result"))
+        failures += 0 if code == 0 and result and "0 warning" in result[0] else 1
+        frames = man["files"][name]["frames"]
+        failures += 0 if frames == model_total else 1
+        log.append("decoded length %s: %d frames, %d in the WAV sample %s" % (name, frames, model_total,
+                                                                            "OK" if frames == model_total else "FAILED"))
+    if OGG_FULL in ogg_files:
+        base, entry = ogg_files[OGG_FULL][0], man["files"][OGG_FULL]
+        comments = read_ogg(base)["comments"]
+        renumbered = []
+        for c in comments:
+            key, _sep, value = c.partition("=")
+            k = key.upper()
+            if k.startswith("CHAPTER") and k[7:10].isdigit():
+                renumbered.append("CHAPTER%03d%s=%s" % (int(k[7:10]) + 10, k[10:], value))
+            else:
+                renumbered.append(c)
+        cases = [
+            ("comments reordered, one added", ogg_with_comments(base, comments[::-1] + ["ENCODER=a tag editor"]),
+             dict(), ["ENCODER"]),
+            ("segment list dropped", ogg_with_comments(base, [c for c in comments if not c.startswith("TT_SEGMENT_LIST=")]),
+             dict(list="LOST"), []),
+            ("chapters renumbered", ogg_with_comments(base, renumbered), dict(chapters="SAME"), []),
+            ("one audio byte changed", ogg_flip_audio_byte(base), dict(audio="CHANGED"), []),
+            ("header pages cut otherwise", ogg_with_comments(base, comments, max_segments=17), dict(), []),
+        ]
+        for label, data, expect, extra in cases:
+            rep = check_ogg_bytes(data, entry, label)
+            wrong = {k: rep.status[k] for k, v in expect.items() if rep.status[k] != v}
+            others = {k: s for k, s in rep.status.items() if k not in expect and s not in ("OK", "n/a")}
+            ok = not wrong and not others and rep.extra == extra
+            failures += 0 if ok else 1
+            log.append("ogg mutation %-31s %s %s" % (label + ":", "OK" if ok else "FAILED",
+                                                    (wrong or others or rep.extra) if not ok else ""))
+            if label == "one audio byte changed" and not any("AUDIO_SHA256 no longer matches" in l for l in rep.lines):
+                failures += 1
+                log.append("   FAILED: the AUDIO_SHA256 rule did not fire")
+    for name, checks in ((OGG_FULL, (("ogg_file", ["COMMENT", "DESCRIPTION", "KEYWORDS"]), ("ogg_chapter", None),
+                                     ("ogg_list", ["TT_SEGMENT_LIST"]))),
+                         (OGG_MANY, (("ogg_many_list", ["TT_SEGMENT_LIST"]), ("ogg_many_chap", None)))):
+        if name not in ogg_files:
+            continue
+        cm = comment_map(read_ogg(ogg_files[name][0])["comments"])
+        for token_key, expect in checks:
+            holders = sorted(k for k, values in cm.items() if any(TOKENS[token_key] in v for v in values))
+            if expect is None:                       # one chapter name only
+                ok = len(holders) == 1 and holders[0].startswith("CHAPTER") and holders[0].endswith("NAME")
+            else:
+                ok = holders == expect
+            failures += 0 if ok else 1
+            log.append("search word %-15s in %s %s" % (TOKENS[token_key], ", ".join(holders), "OK" if ok else "FAILED"))
+
+    # 5. optional: ffprobe reads the markers as chapters
     probe = shutil.which("ffprobe") if use_ffprobe else None
     if probe:
-        for name in files:
+        for name in list(files) + list(ogg_files):
             try:
                 r = subprocess.run([probe, "-v", "error", "-show_chapters", "-of", "json", os.path.join(OUT_DIR, name)],
                                    capture_output=True, text=True, timeout=60)
@@ -1174,16 +1786,19 @@ def generate(use_ffprobe=True):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="TT File Format v0.1 sample files and checker (stdlib).")
+    ap = argparse.ArgumentParser(description="TT File Format v0.2 sample files and checker (stdlib).")
     ap.add_argument("--check", metavar="FILE", help="compare a copy that went through another program")
     ap.add_argument("--validate", metavar="FILE", help="check any TT file against the rules of the specification")
     ap.add_argument("--as", dest="as_name", metavar="NAME", help="sample name of the file when it was renamed")
     ap.add_argument("--no-ffprobe", action="store_true", help="skip the optional ffprobe reading")
+    ap.add_argument("--make-ogg-audio", action="store_true", help="kit maintainers: encode ogg_audio/ again (ffmpeg)")
     args = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(errors="replace")
     except (AttributeError, ValueError):
         pass
+    if args.make_ogg_audio:
+        return make_ogg_audio()
     if args.validate:
         return validate_file(args.validate)
     if args.check:

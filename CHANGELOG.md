@@ -1,5 +1,14 @@
 # Changelog
 
+## Draft 0.2 (2026-11-04)
+
+- Ogg files, Vorbis and Opus (section 11): the same segment list in one Vorbis comment, chapters as the marker
+  mirror, the summary in comments, and an audio fingerprint over the audio packets. Nothing changes for WAV files:
+  a WAV file written for draft 0.1 stays valid.
+- Kit: three Ogg samples (`tt_v0_full.ogg`, `tt_v0_full.opus`, `tt_v0_many.ogg`), made from the encoded audio in
+  `kit/ogg_audio/`; `--check` and `--validate` read Ogg files. The WAV samples are unchanged.
+- New open question: one comment for the whole list, or one per segment.
+
 ## Draft 0.1 (2026-10-22)
 
 - First public draft: segment list in iXML (`TT_SEGMENT_LIST`), marker mirror, file-level summary, integrity

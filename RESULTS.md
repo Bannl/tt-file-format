@@ -10,6 +10,10 @@ welcome as issues.
 | BaseHead | not tested |  |  |  |
 | REAPER | not tested |  |  |  |
 | iZotope RX | not tested |  |  |  |
+
+Ogg samples (draft 0.2): ffmpeg 6.0 (ffprobe) lists their chapters (5 in `tt_v0_full.ogg` and `tt_v0_full.opus`,
+400 in `tt_v0_many.ogg`) and decodes the three files without error. Game engines (Unity, Unreal, Godot), audio
+middleware (FMOD, Wwise) and tag editors are not tested yet.
 | Pro Tools | not tested |  |  |  |
 | Nuendo / WaveLab | not tested |  |  |  |
 

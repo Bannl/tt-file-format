@@ -1,27 +1,30 @@
-# TT File Format, version 0.1 (draft)
+# TT File Format, version 0.2 (draft)
 
-Sound segments with their full metadata, inside a standard WAV file.
+Sound segments with their full metadata, inside a standard WAV or Ogg file.
 
 Status: public draft, open for comments. Details may still change before version 1.0; the open questions are
-listed in section 12. The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in RFC 2119.
+listed in section 13. The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in RFC 2119.
 
 Revisions: 2026-10-22, draft 0.1, with reader rules and the summary rule completed from a first interoperability
-test (Appendix B).
+test (Appendix B). 2026-11-04, draft 0.2: Ogg files (Vorbis, Opus), section 11. Nothing changes for WAV files: a
+WAV file written for draft 0.1 stays valid.
 
 ## 1. Purpose
 
-A TT file is a standard WAV file that holds several sounds (segments), each with its own name and its own
-metadata, at the same level of detail as a separate file would have. The format is built so that:
+A TT file is a standard WAV file, or a standard Ogg file (section 11), that holds several sounds (segments), each
+with its own name and its own metadata, at the same level of detail as a separate file would have. The format is
+built so that:
 
-1. every program plays a TT file as an ordinary WAV;
-2. every program that reads WAV markers sees each segment as a named region;
+1. every program plays a TT file as an ordinary WAV or Ogg file;
+2. every program that reads markers (WAV cue points, Ogg chapters) sees each segment by name;
 3. a program that implements this specification can list and index each segment as its own sound, with all its
    metadata, and open the file directly at that segment;
 4. a TT file can be split back into separate files, each with its name, its metadata and, when recorded, its
    original timecode.
 
 A TT file adds no new container and no new file extension. It combines chunks that already exist (RIFF `cue `,
-`LIST/adtl`, `bext`, `iXML`) and defines one new iXML object, the segment list.
+`LIST/adtl`, `bext`, `iXML`) and defines one new iXML object, the segment list. In an Ogg file, the same list is a
+Vorbis comment (section 11).
 
 ## 2. Terms
 
@@ -30,7 +33,8 @@ A TT file adds no new container and no new file extension. It combines chunks th
 - **Rewriter**: a program that rewrites the file for another reason (for example to change file-level metadata)
   without changing the audio.
 - **Reader**: a program that reads the segments.
-- **Frame**: one sample frame (one sample per channel), counted from the first frame of the `data` chunk.
+- **Frame**: one sample frame (one sample per channel), counted from the first frame of the `data` chunk (Ogg
+  files: section 11.1).
 
 ## 3. Layers
 
@@ -42,9 +46,10 @@ A TT file adds no new container and no new file extension. It combines chunks th
 | Segment list | iXML `TT_SEGMENT_LIST` | programs that implement this spec | the reference copy: every segment with all its data |
 | XMP mirror (optional) | `_PMX` (XMP `xmpDM:Tracks`) | Adobe tools, REAPER | named markers with key/value pairs |
 
-The segment list is the reference. The marker mirror and the XMP mirror are derived from it.
+The segment list is the reference. The marker mirror and the XMP mirror are derived from it. Ogg files carry the
+same layers in Vorbis comments (section 11).
 
-## 4. Audio and file
+## 4. Audio and file (WAV files)
 
 - The file MUST be a valid RIFF/WAVE file, or an RF64/BW64 file when it is larger than 4 GB.
 - The file name extension MUST stay `.wav`.
@@ -54,14 +59,15 @@ The segment list is the reference. The marker mirror and the XMP mirror are deri
 ## 5. Segment list (normative)
 
 The segment list is an element `TT_SEGMENT_LIST` placed directly under the root `BWFXML` element of the iXML
-chunk. It follows the iXML conventions: UTF-8 XML, upper-case element names, values as element text, no
-attributes. Numbers are written in decimal without separators; decimals use a dot.
+chunk (in an Ogg file: the value of a comment, section 11.2). It follows the iXML conventions: UTF-8 XML,
+upper-case element names, values as element text, no attributes. Numbers are written in decimal without
+separators; decimals use a dot.
 
 ```
 BWFXML
   ...                      (file-level iXML: IXML_VERSION, SPEED, USER, ASWG, NOTE...)
   TT_SEGMENT_LIST
-    TT_VERSION             required   "0.1"
+    TT_VERSION             required   lowest draft that defines what the file uses: "0.1" (WAV), "0.2" (Ogg)
     WRITER                 optional   program and version that last wrote the list
     SAMPLE_RATE            required   frames per second of the data chunk
     TOTAL_FRAMES           required   frames in the data chunk when the list was written
@@ -184,7 +190,64 @@ and the segment's fields as `xmpDM:cuePointParams` key/value pairs. It serves Ad
 REAPER, which read XMP markers. No standard reconciles XMP markers with cue points: a writer that adds them MUST
 keep them identical to the segment list.
 
-## 11. Example
+## 11. Ogg files (normative)
+
+Ogg Vorbis and Ogg Opus are the usual compressed formats of game audio. A TT file can also be an Ogg file: the
+segment list keeps the content of section 5, only its carriers change. An Ogg file has no chunks, but Vorbis
+comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same structure in its `OpusTags` header).
+
+### 11.1 Audio and frames
+
+- The file MUST hold one logical bitstream, Vorbis or Opus: no chaining, no multiplexing. Extensions: `.ogg` for
+  Vorbis, `.opus` (or `.ogg`) for Opus.
+- Frames are decoded samples per channel, counted from the first sample a decoder returns: for Vorbis, the sample
+  at granule position 0; for Opus, the first sample after the pre-skip of the `OpusHead` header, at 48000 Hz
+  whatever the input rate written in `OpusHead`.
+- `SAMPLE_RATE` is the decoded rate (Vorbis: the rate of the identification header; Opus: 48000). `TOTAL_FRAMES`
+  is the number of decoded frames: for Vorbis the granule position of the last page, for Opus that granule
+  position minus the pre-skip. `TT_VERSION` is `0.2`.
+
+### 11.2 Carriers
+
+| Layer | Carrier in an Ogg file | Read by |
+|---|---|---|
+| File-level summary | comments `TITLE`, `DESCRIPTION`, `COMMENT`, keywords | players, tag editors, library tools |
+| Marker mirror | comments `CHAPTERnnn` and `CHAPTERnnnNAME` | ffmpeg and the players built on it |
+| Segment list | one comment `TT_SEGMENT_LIST` | programs that implement this spec |
+
+- **Segment list**: the value of the comment `TT_SEGMENT_LIST` is the element `TT_SEGMENT_LIST` of section 5 as
+  UTF-8 XML, without XML declaration. It SHOULD be written on one line: some tag editors mishandle values with
+  line breaks. A file MUST NOT hold more than one such comment.
+- **Marker mirror**: each segment SHOULD have a chapter, that is a pair of comments `CHAPTERnnn=HH:MM:SS.mmm` (its
+  start, rounded to the millisecond) and `CHAPTERnnnNAME=<name>` (a short name, UTF-8), nnn on three digits from
+  001: the common Ogg chapter convention. The segment's `CUE_ID` is the number nnn, or 0 when it has no chapter.
+  Chapters have no end: the length is only in the list. Writers SHOULD number all chapters in time order; chapters
+  that are not segments MUST be kept (their numbers MAY change). Readers MUST find the chapter of a segment through
+  its `CUE_ID` and MUST NOT expect time order. Beyond 999 chapters, the later segments have none.
+- **File-level summary** (section 7): the description in full in `DESCRIPTION`, and the same text in `COMMENT`,
+  which many players and tag editors show instead. Vorbis comments have no common keywords field: writers SHOULD
+  put the union of the segments' keywords in the field they already use for the keywords of a file (for example
+  `KEYWORDS` or `GENRE`).
+
+### 11.3 Integrity and editing
+
+- `AUDIO_SHA256` is the SHA-256 of the audio packets in stream order: every packet after the header packets (3
+  for Vorbis, 2 for Opus), without page headers or lacing values. It does not change when the comments are
+  rewritten or the pages renumbered. The decoded audio is not used: decoders do not all return the same samples.
+- Section 8 applies, with chapters in place of cue points. A rewriter that changes only comments MUST keep
+  `TT_SEGMENT_LIST` unchanged and the chapters of the segments. A program that re-encodes the audio changes
+  `AUDIO_SHA256` and may shift the frames (encoder delay): it MUST update the list or remove it with its chapters.
+
+### 11.4 Splitting and referencing (informative)
+
+- A segment is referenced as in section 9: `<file>.ogg#tt=<SEGMENT_ID>`.
+- Vorbis and Opus cannot be cut at any frame without decoding: a split decodes each segment (to WAV) or re-encodes
+  it (`ORIGIN/CONVERSION` of the result: `lossy`).
+- The comment header is read before the first audio packet. A long list (hundreds of segments with all their
+  fields) delays the start of streamed playback and may exceed what some decoders accept: test the programs you
+  target with `kit/samples/tt_v0_many.ogg`, which carries about 320 KB of comments.
+
+## 12. Example
 
 Chunk layout: `RIFF/WAVE`: `fmt `, `bext`, `iXML`, `cue `, `LIST/adtl`, `LIST/INFO`, `data`.
 
@@ -242,20 +305,24 @@ Marker mirror of the same file: cue 1 at 0, cue 2 at 120000; `labl` 1 = `Door Sl
 `Porte d'entree qui grince` (ASCII); `note` 1 and 2 = the descriptions (ASCII); `ltxt` 1 = 96000 frames,
 `ltxt` 2 = 144000 frames.
 
-## 12. Open questions
+## 13. Open questions
 
 1. **Carrier**: iXML only, or also a dedicated RIFF chunk carrying the same XML (candidate ID `ttsg`), for
    programs that drop unknown iXML elements when they rewrite a file. To be decided from tests in more programs
    (Appendix B; the test kit is in `kit/`).
 2. **Analysis data**: lanes, groups, frequency bands and species as common elements, or left to each program?
-3. **Other formats**: FLAC, AIFF, BW64 with ADM, and a sidecar file for formats without room for metadata.
+3. **Other formats**: FLAC (Vorbis comments, close to section 11), AIFF, BW64 with ADM, Matroska / WebM, and a
+   sidecar file for formats without room for metadata.
 4. **Registration**: propose the object to the iXML committee, as Sony did for its ASWG object (added to the
    iXML specification in revision 3.01, October 2021).
+5. **Ogg carrier**: one comment for the whole list, or one comment per segment for tag editors that limit the
+   length of a value? To be decided from tests in game engines, audio middleware and tag editors.
 
 Decided: the name (TT File Format, elements `TT_SEGMENT_LIST` and `TT_SEGMENT`); the original chunks of a segment
-(`ORIGIN/CHUNK_LIST`) stay in version 1 as an option; the licences (section 13).
+(`ORIGIN/CHUNK_LIST`) stay in version 1 as an option; Ogg files carry the same list in a Vorbis comment (section
+11); the licences (section 14).
 
-## 13. Licence
+## 14. Licence
 
 This specification is published under the Creative Commons Attribution 4.0 International licence (CC BY 4.0):
 <https://creativecommons.org/licenses/by/4.0/>. The code of the test kit (`kit/`) is published under the MIT
@@ -290,6 +357,10 @@ compares a file rewritten by a program with the original). Results so far:
 
 Other programs (Soundminer, BaseHead, REAPER, iZotope RX, Pro Tools, Nuendo / WaveLab) are not tested yet.
 Results for them are welcome: see `kit/TEST_PROTOCOL.md`.
+
+Ogg samples (draft 0.2): ffmpeg 6.0 (ffprobe) lists their chapters, 5 in `tt_v0_full.ogg` and `tt_v0_full.opus`
+and 400 in `tt_v0_many.ogg`, and decodes the three files without error. No other program is tested yet; game
+engines, audio middleware and tag editors are the most wanted.
 
 ## Appendix C. Alternatives considered (informative)
 
