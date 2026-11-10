@@ -14221,7 +14221,7 @@
      "Knock Knock"
     ]
    },
-   "list_sha256": "177589e18db837c169aa3753a964a1e2043e7b6e44d6c56cc22499ec915b6af8",
+   "list_sha256": "fb37686e7eda8ba95c55f58774dec2498e1117a6c7d667de818febae8a1dd191",
    "list": {
     "header": {
      "TT_VERSION": "0.2",
@@ -14229,6 +14229,9 @@
      "SAMPLE_RATE": "48000",
      "TOTAL_FRAMES": "340800",
      "AUDIO_SHA256": "724ed6588628e3cddd2aeb5686200d59e4e1f51d237c4311295646e3f518f60a",
+     "TIME_REFERENCE": "1728000000",
+     "TIMECODE_RATE": "25/1",
+     "TIMECODE_FLAG": "NDF",
      "SEGMENT_COUNT": "4"
     },
     "segments": [
@@ -14412,7 +14415,7 @@
      "Knock Knock"
     ]
    },
-   "list_sha256": "6599607bc0b26e693645184785c411a7664f4ba59e84ed43f0eca5330af082fe",
+   "list_sha256": "f53823726ae04273adff016a71bf2925de405cede2bd0ddc901b8dac58c31bac",
    "list": {
     "header": {
      "TT_VERSION": "0.2",
@@ -14420,6 +14423,9 @@
      "SAMPLE_RATE": "48000",
      "TOTAL_FRAMES": "340800",
      "AUDIO_SHA256": "47e48749698fdbeaca371f9cf27610a2baa06fa057a522015719258b24521249",
+     "TIME_REFERENCE": "1728000000",
+     "TIMECODE_RATE": "25/1",
+     "TIMECODE_FLAG": "NDF",
      "SEGMENT_COUNT": "4"
     },
     "segments": [

@@ -7,7 +7,9 @@ listed in section 13. The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY a
 
 Revisions: 2026-10-22, draft 0.1, with reader rules and the summary rule completed from a first interoperability
 test (Appendix B). 2026-11-04, draft 0.2: Ogg files (Vorbis, Opus), section 11. Nothing changes for WAV files: a
-WAV file written for draft 0.1 stays valid.
+WAV file written for draft 0.1 stays valid. 2026-11-10, draft 0.2 amended: an optional file time reference in the
+list header (`TIME_REFERENCE`, `TIMECODE_RATE`, `TIMECODE_FLAG`, section 5), the carrier of the timecode of an Ogg
+file (section 11.2). Every file written before stays valid.
 
 ## 1. Purpose
 
@@ -72,9 +74,17 @@ BWFXML
     SAMPLE_RATE            required   frames per second of the data chunk
     TOTAL_FRAMES           required   frames in the data chunk when the list was written
     AUDIO_SHA256           recommended  SHA-256 (hex, lower case) of the data chunk payload when the list was written
+    TIME_REFERENCE         optional   time of frame 0: frames since midnight at SAMPLE_RATE (as the bext TimeReference)
+    TIMECODE_RATE          optional   timecode rate of that time, as iXML SPEED writes it: "25/1", "30000/1001"
+    TIMECODE_FLAG          optional   "NDF", or "DF" (drop frame), as iXML SPEED writes it
     SEGMENT_COUNT          required   number of TT_SEGMENT elements
     TT_SEGMENT             one per segment, in ascending START_SAMPLE order
 ```
+
+The file time reference (`TIME_REFERENCE`, with `TIMECODE_RATE` and `TIMECODE_FLAG`) tells when the first frame
+was recorded or where it sits on a timeline, so that a split can give each sound its timecode. In a WAV file the
+`bext` TimeReference stays its carrier (and iXML `SPEED` its rate): a list that also has `TIME_REFERENCE` MUST give
+the same value. In an Ogg file, which has no `bext`, the list is its carrier (section 11.2).
 
 ### 5.1 `TT_SEGMENT`
 
@@ -151,7 +161,10 @@ Library tools that index only file-level metadata MUST still find a TT file thro
 ## 8. Integrity and editing (normative)
 
 - **Writer**: when it writes or changes the segment list, it MUST rewrite the marker mirror (and the XMP mirror
-  when present) and update `SEGMENT_COUNT`, `TOTAL_FRAMES`, `SAMPLE_RATE` and, when written, `AUDIO_SHA256`.
+  when present) and update `SEGMENT_COUNT`, `TOTAL_FRAMES`, `SAMPLE_RATE` and, when written, `AUDIO_SHA256`. It
+  MUST keep the file time reference of the list it replaces (`TIME_REFERENCE`, `TIMECODE_RATE`, `TIMECODE_FLAG`)
+  unless it sets a new one; when it changes the `bext` TimeReference of a WAV file, it MUST update the list's
+  `TIME_REFERENCE` too, or remove it.
 - **Rewriter** (audio unchanged): it MUST copy `TT_SEGMENT_LIST` unchanged, including the elements it does not
   know; it MUST keep the cue points and `LIST/adtl` entries of the segments; it SHOULD keep the order of the
   chunks.
@@ -180,7 +193,9 @@ Expected behaviour of a library tool that implements this specification (informa
 - opening a result opens the TT file at that segment;
 - dragging a result to a DAW transfers only that segment;
 - a split writes each segment as a separate WAV with its `NAME`, its metadata (`USER`, `ASWG`, `FIELD_LIST`, or
-  the original chunks of `ORIGIN/CHUNK_LIST`) and, when `ORIGIN/TIME_REFERENCE` is given, its original timecode.
+  the original chunks of `ORIGIN/CHUNK_LIST`) and, when `ORIGIN/TIME_REFERENCE` is given, its original timecode;
+  otherwise, when the file has a time reference (`bext`, or the list's `TIME_REFERENCE` in an Ogg file), that time
+  plus the segment's `START_SAMPLE`.
 
 ## 10. Optional XMP mirror
 
@@ -214,6 +229,7 @@ comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same struct
 | File-level summary | comments `TITLE`, `DESCRIPTION`, `COMMENT`, keywords | players, tag editors, library tools |
 | Marker mirror | comments `CHAPTERnnn` and `CHAPTERnnnNAME` | ffmpeg and the players built on it |
 | Segment list | one comment `TT_SEGMENT_LIST` | programs that implement this spec |
+| File time reference | `TIME_REFERENCE`, `TIMECODE_RATE`, `TIMECODE_FLAG` of the segment list (section 5) | programs that implement this spec |
 
 - **Segment list**: the value of the comment `TT_SEGMENT_LIST` is the element `TT_SEGMENT_LIST` of section 5 as
   UTF-8 XML, without XML declaration. It SHOULD be written on one line: some tag editors mishandle values with
@@ -228,6 +244,10 @@ comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same struct
   which many players and tag editors show instead. Vorbis comments have no common keywords field: writers SHOULD
   put the union of the segments' keywords in the field they already use for the keywords of a file (for example
   `KEYWORDS` or `GENRE`).
+- **File time reference**: the time of the first decoded frame, when the file has one, is the list's
+  `TIME_REFERENCE`, in frames since midnight at `SAMPLE_RATE` (48000 for Opus), with `TIMECODE_RATE` and
+  `TIMECODE_FLAG`. Some converters copy the `bext` TimeReference of a WAV file into a `TIME_REFERENCE` comment
+  without converting it to the new rate: such a comment is not this carrier, and readers SHOULD NOT use it.
 
 ### 11.3 Integrity and editing
 

@@ -311,9 +311,12 @@ def segment_lines(s, variant, rich, cue_id=None, conversion=None):
 
 
 def segment_list_lines(segs, total, audio_sha, variant, rich, version=SPEC_VERSION, writer=WRITER, rate=SR,
-                       cue_ids=None, conversion=None):
+                       cue_ids=None, conversion=None, time_ref=None):
     lines = ["<TT_SEGMENT_LIST>", el("TT_VERSION", version), el("WRITER", writer), el("SAMPLE_RATE", rate),
-             el("TOTAL_FRAMES", total), el("AUDIO_SHA256", audio_sha), el("SEGMENT_COUNT", len(segs))]
+             el("TOTAL_FRAMES", total), el("AUDIO_SHA256", audio_sha)]
+    if time_ref:                                     # (frames since midnight, timecode rate, flag): section 5, 2026-11-10
+        lines += [el("TIME_REFERENCE", time_ref[0]), el("TIMECODE_RATE", time_ref[1]), el("TIMECODE_FLAG", time_ref[2])]
+    lines.append(el("SEGMENT_COUNT", len(segs)))
     for s in segs:
         lines += segment_lines(s, variant, rich, None if cue_ids is None else cue_ids.get(s["uid"], 0), conversion)
     lines.append("</TT_SEGMENT_LIST>")
@@ -1140,9 +1143,9 @@ def ogg_segments(key, fsegs, msegs):
     return segs, False, None
 
 
-def ogg_tt_comments(segs, total, rate, audio_sha, rich, title, foreign=None, conversion=None):
+def ogg_tt_comments(segs, total, rate, audio_sha, rich, title, foreign=None, conversion=None, time_ref=None):
     """Comments of an Ogg sample (section 11): summary, chapters of every marker in time order (CUE_ID = chapter
-    number), then the segment list on one line."""
+    number), then the segment list on one line (with the file time reference `time_ref` when given)."""
     marks = sorted([(s["start"], 1, s) for s in segs] + ([(foreign["position"], 0, None)] if foreign else []),
                    key=lambda m: (m[0], m[1]))
     chapters, cue_ids = [], {}
@@ -1155,7 +1158,7 @@ def ogg_tt_comments(segs, total, rate, audio_sha, rich, title, foreign=None, con
         chapters.append(("%03d" % num, chapter_time(pos, rate), name))
     desc, keywords = summary(segs, "ogg_file")
     lst = "".join(segment_list_lines(segs, total, audio_sha, "ogg", rich, OGG_SPEC_VERSION, OGG_WRITER, rate,
-                                     cue_ids, conversion))
+                                     cue_ids, conversion, time_ref))
     comments = ["TITLE=" + title, "DESCRIPTION=" + desc, "COMMENT=" + desc, "KEYWORDS=" + keywords]
     for num, t, name in chapters:
         comments += ["CHAPTER%s=%s" % (num, t), "CHAPTER%sNAME=%s" % (num, name)]
@@ -1245,6 +1248,31 @@ def check_ogg_bytes(data, entry, title):
     return rep
 
 
+def check_time_reference(h, ok, bad, warn, bext_tref=None):
+    """The optional file time reference of the list header (section 5, draft 0.2 amended 2026-11-10): TIME_REFERENCE
+    a whole number of frames, TIMECODE_RATE "N/D", TIMECODE_FLAG "NDF" or "DF"; in a WAV file with a bext, the same
+    value as its TimeReference."""
+    tref, trate, tflag = h.get("TIME_REFERENCE"), h.get("TIMECODE_RATE"), h.get("TIMECODE_FLAG")
+    if tref is None and trate is None and tflag is None:
+        return
+    if tref is None:
+        warn("TIMECODE_RATE / TIMECODE_FLAG without TIME_REFERENCE (section 5)")
+    elif not tref.isdigit():
+        bad("TIME_REFERENCE is not a whole number of frames: %s" % tref[:40])
+    elif bext_tref is not None and int(tref) != bext_tref:
+        bad("TIME_REFERENCE %s, but the bext TimeReference is %d (they MUST be equal, section 5)" % (tref, bext_tref))
+    else:
+        ok("TIME_REFERENCE %s" % tref + (" (same as the bext TimeReference)" if bext_tref is not None else ""))
+    if trate is not None:
+        num, sep, den = trate.partition("/")
+        if not (sep and num.isdigit() and den.isdigit() and int(num) > 0 and int(den) > 0):
+            bad("TIMECODE_RATE is not \"N/D\" (as iXML SPEED writes it): %s" % trate[:40])
+        elif tflag == "DF" and den != "1001":
+            warn("TIMECODE_FLAG DF with TIMECODE_RATE %s (drop frame is for 30000/1001 and 60000/1001)" % trate)
+    if tflag is not None and tflag not in ("NDF", "DF"):
+        bad("TIMECODE_FLAG is neither NDF nor DF: %s" % tflag[:40])
+
+
 def validate_ogg(path, data):
     """Spec checks for an Ogg TT file (section 11). 0 = no FAIL."""
     lines, counts = [], {"fail": 0, "warn": 0}
@@ -1318,6 +1346,7 @@ def validate_ogg(path, data):
         bad("AUDIO_SHA256 does not match the audio packets (re-encoded after the list was written?)")
     else:
         ok("AUDIO_SHA256 matches the audio packets")
+    check_time_reference(h, ok, bad, warn)
 
     chapters = ogg_chapters(cm)
     seen, prev, broken = set(), -1, 0
@@ -1493,6 +1522,9 @@ def validate_file(path):
         bad("AUDIO_SHA256 does not match the audio (the audio changed after the list was written?)")
     else:
         ok("AUDIO_SHA256 matches the audio")
+    bext_body_ = by["bext"]["body"] if "bext" in by else b""
+    check_time_reference(h, ok, bad, warn,
+                         struct.unpack("<Q", bext_body_[338:346])[0] if len(bext_body_) >= 346 else None)
 
     cue = read_cue(by["cue "]["body"]) if "cue " in by else {}
     labels, notes, ltxts, order = read_adtl(by["LIST/adtl"]["body"]) if "LIST/adtl" in by else ({}, {}, {}, [])
@@ -1608,8 +1640,10 @@ def generate(use_ffprobe=True):
             base_data = f.read()
         info = read_ogg(base_data)
         segs, rich, foreign = ogg_segments(key, fsegs, msegs)
+        # the full samples carry a file time reference: 10:00:00:00 at 25 fps (draft 0.2 amended, 2026-11-10)
+        time_ref = (10 * 3600 * info["rate"], "25/1", "NDF") if key == "full" else None
         data = ogg_with_comments(base_data, ogg_tt_comments(segs, info["total"], info["rate"], info["audio_sha256"],
-                                                             rich, title, foreign, conversion))
+                                                             rich, title, foreign, conversion, time_ref))
         with open(os.path.join(OUT_DIR, name), "wb") as f:
             f.write(data)
         man["files"][name] = describe_ogg(data)
