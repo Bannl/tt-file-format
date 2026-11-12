@@ -1408,6 +1408,19 @@ def table_text(header, segments, id_namespace=None, keep_order=True):
     return text
 
 
+def _xml_cell_problem(text):
+    """What makes an XML cell or the XML member break section 11.5, or None. It holds elements, written whole one
+    after the other, that a reader puts into the XML list as they are: text outside them (white space apart) would
+    become text of TT_SEGMENT or of TT_SEGMENT_LIST."""
+    try:
+        holder = ET.fromstring("<TT_XML_CELL>%s</TT_XML_CELL>" % text)
+    except ET.ParseError as e:
+        return "is not XML (%s)" % e
+    if (holder.text or "").strip() or any((e.tail or "").strip() for e in holder):
+        return "holds text outside its elements"
+    return None
+
+
 def table_model(text, problems=None):
     """The value of a TT_SEGMENT_TABLE comment -> (header, segments) as list_model gives them, the elements of each
     segment in the order of ORDER. `problems` (a list) receives what breaks a rule of section 11.5. ValueError when the
@@ -1452,6 +1465,10 @@ def table_model(text, problems=None):
             header[k] = v                                    # a member not known here: a header element of a later draft
         else:
             report("member %s is not a string" % k)
+    if header.get("XML"):
+        why = _xml_cell_problem(header["XML"])
+        if why:
+            report("member XML %s" % why)
     rank = {p: i for i, p in enumerate(order)}
     segments, derived = [], []
     for r, row in enumerate(rows, 1):
@@ -1469,6 +1486,11 @@ def table_model(text, problems=None):
             derived.append(name)
         if "CUE_ID" not in have:
             pairs.append(("CUE_ID", "0"))
+        cell = dict(pairs).get("XML")
+        if cell:
+            why = _xml_cell_problem(cell)
+            if why:
+                report("row %d, XML cell %s" % (r, why))
         if rank:
             pairs.sort(key=lambda pv: rank.get(pv[0], len(rank)))   # stable: the paths ORDER lacks keep their order
         segments.append(pairs)
@@ -2598,6 +2620,12 @@ def generate(use_ffprobe=True):
                   ("table, deflated chunk damaged", with_table(damaged), "FAIL"),
                   ("table of TT_VERSION 0.2", with_table(tvalue.replace('"TT_VERSION":"0.3"', '"TT_VERSION":"0.2"')),
                    "PASS (0 fail, 2 warning)")]
+        outside = tvalue.replace('"<ORIGIN>', '"x<ORIGIN>', 1)   # an XML cell with text before its element
+        if outside == tvalue:
+            failures += 1
+            log.append("validator table, text outside an XML cell: FAILED (no XML cell <ORIGIN> to change)")
+        else:
+            cases.append(("table, text outside an XML cell", with_table(outside), "FAIL"))
     src_b64 = base64.b64encode(src_bext_body(fsegs[0])).decode("ascii")
 
     def wav_with_ixml(transform):

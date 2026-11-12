@@ -8,6 +8,9 @@
   further conversions keep it. The text promised the same order in every case with `ORDER`; a list whose segments
   order their elements differently shows it does not hold there (found by AudioCrucible's self-test, the kit
   behaves the same).
+- Section 11.5: an `XML` cell, like the `XML` member, holds elements only; text outside them, white space apart,
+  breaks the section (a reader would put it into the XML list as text of a segment or of the list). The kit's
+  `--validate` reports it; AudioCrucible already refused such a table.
 
 ## Draft 0.3 (2026-11-12)
 
