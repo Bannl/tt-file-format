@@ -1,15 +1,23 @@
-# TT File Format, version 0.2 (draft)
+# TT File Format, version 0.3 (draft)
 
 Sound segments with their full metadata, inside a standard WAV or Ogg file.
 
 Status: public draft, open for comments. Details may still change before version 1.0; the open questions are
-listed in section 13. The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in RFC 2119.
+listed in section 14. The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in RFC 2119.
 
 Revisions: 2026-10-22, draft 0.1, with reader rules and the summary rule completed from a first interoperability
 test (Appendix B). 2026-11-04, draft 0.2: Ogg files (Vorbis, Opus), section 11. Nothing changes for WAV files: a
 WAV file written for draft 0.1 stays valid. 2026-11-10, draft 0.2 amended: an optional file time reference in the
 list header (`TIME_REFERENCE`, `TIMECODE_RATE`, `TIMECODE_FLAG`, section 5), the carrier of the timecode of an Ogg
-file (section 11.2). Every file written before stays valid.
+file (section 11.2). Every file written before stays valid. 2026-11-12, draft 0.2 amended again, from the first Ogg
+TT files written outside the kit and AudioCrucible (Appendix B): the rounding of chapter times and chapter numbers
+of three digits at most (section 11.2), notes on large lists and on playing one segment (section 11.4), stable
+segment IDs (section 5.1), an Ogg Opus example (now section 13). Every file written before stays valid, except a
+file with chapter numbers of four digits or more (none is known). 2026-11-12, draft 0.3, from a study of the weight
+of TT files against the same sounds as separate files (Appendix B): the segment table, a compact form of the list
+for Ogg files that keeps every element of every segment (section 11.5); the weight of a TT file (section 12);
+original chunks deflated before base64 (section 5.2); silence between sounds and splitting without decoding
+(section 11.4). Every file written before stays valid.
 
 ## 1. Purpose
 
@@ -69,7 +77,8 @@ separators; decimals use a dot.
 BWFXML
   ...                      (file-level iXML: IXML_VERSION, SPEED, USER, ASWG, NOTE...)
   TT_SEGMENT_LIST
-    TT_VERSION             required   lowest draft that defines what the file uses: "0.1" (WAV), "0.2" (Ogg)
+    TT_VERSION             required   lowest draft that defines what the file uses: "0.1" (WAV), "0.2" (Ogg),
+                                      "0.3" (segment table, deflated original chunks)
     WRITER                 optional   program and version that last wrote the list
     SAMPLE_RATE            required   frames per second of the data chunk
     TOTAL_FRAMES           required   frames in the data chunk when the list was written
@@ -106,6 +115,14 @@ the same value. In an Ogg file, which has no `bext`, the list is its carrier (se
 The metadata of a segment is written exactly like the metadata of a file (`USER`, `ASWG`), so a program that
 already reads file-level iXML can read a segment with the same code.
 
+`SEGMENT_ID` is what a reference to the segment holds (section 9). A random UUID (version 4) suits a segment that a
+program creates once. A program that builds a file again from the same sources, such as a sound bank made by a
+script, MAY instead derive each `SEGMENT_ID` from a key of the sound: a name-based UUID (version 5, RFC 9562) of
+that key, in a namespace UUID of the program's own. The references then stay valid from one build to the next. The
+key MUST be unique in the file, and SHOULD name the sound rather than its place: a position (the third line of a
+scene) designates another sound as soon as a line is inserted before it. In a segment table (section 11.5), IDs
+derived from the `NAME` of each segment MAY be left out, the namespace written once.
+
 ### 5.2 `ORIGIN`
 
 | Element | Content |
@@ -116,7 +133,7 @@ already reads file-level iXML can read a segment with the same code.
 | `TIME_REFERENCE` | BWF TimeReference of the source (frames since midnight at the source rate), so that a split can give the sound back its original timecode. |
 | `CONVERSION` | `none` (bytes copied), `exact` (lossless change, for example 16 to 24 bits or mono to every channel), `lossy` (resampling, dither, downmix or a lossy codec). |
 | `CONVERSION_NOTE` | Free text, for example `44100 Hz to 48000 Hz`. |
-| `CHUNK_LIST` | Verbatim copies of the source's metadata chunks, as `CHUNK` elements with `CHUNK_ID` (four characters) and `DATA_BASE64`. With them, a split can restore every original chunk byte for byte. |
+| `CHUNK_LIST` | Verbatim copies of the source's metadata chunks, as `CHUNK` elements with `CHUNK_ID` (four characters) and either `DATA_BASE64` (the body of the chunk in base64, RFC 4648) or `DATA_DEFLATE_BASE64` (the body as a zlib stream, RFC 1950, in base64). With them, a split can restore every original chunk byte for byte. Writers SHOULD use the shorter of the two: deflated, the XMP packets (`_PMX`) of a test library took 15 % of their bytes, its `bext` chunks 18 % (Appendix B). A list that uses `DATA_DEFLATE_BASE64` has `TT_VERSION` 0.3. Readers MUST read both forms and MAY refuse a chunk that inflates beyond 64 MiB; a reader that finds neither form in a `CHUNK` leaves that chunk out, and does not restore it empty. |
 
 ## 6. Marker mirror (normative)
 
@@ -220,7 +237,8 @@ comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same struct
   whatever the input rate written in `OpusHead`.
 - `SAMPLE_RATE` is the decoded rate (Vorbis: the rate of the identification header; Opus: 48000). `TOTAL_FRAMES`
   is the number of decoded frames: for Vorbis the granule position of the last page, for Opus that granule
-  position minus the pre-skip. `TT_VERSION` is `0.2`.
+  position minus the pre-skip. `TT_VERSION` is `0.2`, or `0.3` when the file uses a segment table (section 11.5) or
+  deflated original chunks (section 5.2).
 
 ### 11.2 Carriers
 
@@ -229,17 +247,30 @@ comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same struct
 | File-level summary | comments `TITLE`, `DESCRIPTION`, `COMMENT`, keywords | players, tag editors, library tools |
 | Marker mirror | comments `CHAPTERnnn` and `CHAPTERnnnNAME` | ffmpeg and the players built on it |
 | Segment list | one comment `TT_SEGMENT_LIST` | programs that implement this spec |
+| Segment list, compact form | one comment `TT_SEGMENT_TABLE` (section 11.5) | programs that implement this spec |
 | File time reference | `TIME_REFERENCE`, `TIMECODE_RATE`, `TIMECODE_FLAG` of the segment list (section 5) | programs that implement this spec |
 
 - **Segment list**: the value of the comment `TT_SEGMENT_LIST` is the element `TT_SEGMENT_LIST` of section 5 as
   UTF-8 XML, without XML declaration. It SHOULD be written on one line: some tag editors mishandle values with
-  line breaks. A file MUST NOT hold more than one such comment.
+  line breaks. A file MUST NOT hold more than one such comment. From draft 0.3 the list MAY instead be written as a
+  table (section 11.5); a file holds one form, not both.
 - **Marker mirror**: each segment SHOULD have a chapter, that is a pair of comments `CHAPTERnnn=HH:MM:SS.mmm` (its
-  start, rounded to the millisecond) and `CHAPTERnnnNAME=<name>` (a short name, UTF-8), nnn on three digits from
-  001: the common Ogg chapter convention. The segment's `CUE_ID` is the number nnn, or 0 when it has no chapter.
+  start, see chapter times below) and `CHAPTERnnnNAME=<name>` (a short name, UTF-8), nnn on three digits from 001:
+  the common Ogg chapter convention. The segment's `CUE_ID` is the number nnn, or 0 when it has no chapter.
   Chapters have no end: the length is only in the list. Writers SHOULD number all chapters in time order; chapters
   that are not segments MUST be kept (their numbers MAY change). Readers MUST find the chapter of a segment through
-  its `CUE_ID` and MUST NOT expect time order. Beyond 999 chapters, the later segments have none.
+  its `CUE_ID` and MUST NOT expect time order.
+- **Chapter times**: `START_SAMPLE` × 1000 / `SAMPLE_RATE` milliseconds, rounded to the nearest millisecond. A start
+  exactly on a half millisecond MAY be rounded either way: the kit rounds it to the even millisecond (as Python's
+  `round`), JavaScript's `Math.round` and C++'s `std::round` round it up. Validators MUST accept both. In integers,
+  with q the whole part of (`START_SAMPLE` × 1000) / `SAMPLE_RATE` and r the remainder, the time is q + 1 when
+  2r > `SAMPLE_RATE`, q when 2r < `SAMPLE_RATE`, either when 2r = `SAMPLE_RATE`. Readers SHOULD take a chapter at
+  most 1 ms away from `START_SAMPLE` as being at the start of its segment (section 8).
+- **Chapter numbers**: three digits, 001 to 999, chapters of other programs included. Writers MUST NOT write longer
+  numbers: ffmpeg reads the first three digits only, so `CHAPTER1000NAME` renames chapter 100 and `CHAPTER1000` is
+  ignored (Appendix B). Beyond 999 chapters, the later segments have none (`CUE_ID` 0): they are in the list only,
+  and programs that read only chapters do not see them. When such programs must see every sound, writers SHOULD
+  split the sounds into files of at most 999 segments.
 - **File-level summary** (section 7): the description in full in `DESCRIPTION`, and the same text in `COMMENT`,
   which many players and tag editors show instead. Vorbis comments have no common keywords field: writers SHOULD
   put the union of the segments' keywords in the field they already use for the keywords of a file (for example
@@ -255,19 +286,182 @@ comments: `FIELD=value` pairs in UTF-8, of any length (Opus uses the same struct
   for Vorbis, 2 for Opus), without page headers or lacing values. It does not change when the comments are
   rewritten or the pages renumbered. The decoded audio is not used: decoders do not all return the same samples.
 - Section 8 applies, with chapters in place of cue points. A rewriter that changes only comments MUST keep
-  `TT_SEGMENT_LIST` unchanged and the chapters of the segments. A program that re-encodes the audio changes
+  `TT_SEGMENT_LIST` or `TT_SEGMENT_TABLE` unchanged and the chapters of the segments. A program that re-encodes the audio changes
   `AUDIO_SHA256` and may shift the frames (encoder delay): it MUST update the list or remove it with its chapters.
 
-### 11.4 Splitting and referencing (informative)
+### 11.4 Splitting, referencing and playing one segment (informative)
 
 - A segment is referenced as in section 9: `<file>.ogg#tt=<SEGMENT_ID>`.
-- Vorbis and Opus cannot be cut at any frame without decoding: a split decodes each segment (to WAV) or re-encodes
-  it (`ORIGIN/CONVERSION` of the result: `lossy`).
-- The comment header is read before the first audio packet. A long list (hundreds of segments with all their
-  fields) delays the start of streamed playback and may exceed what some decoders accept: test the programs you
-  target with `kit/samples/tt_v0_many.ogg`, which carries about 320 KB of comments.
+- **Splitting**: a split decodes each segment (to WAV), re-encodes it (`ORIGIN/CONVERSION` of the result: `lossy`),
+  or copies its packets (`none`), which loses nothing. Opus: the packets from 80 ms before the segment; the
+  pre-skip of the new `OpusHead` drops what comes before the segment, the granule position of the last page what
+  follows it (RFC 7845, sections 4.2, 4.4 and 5.1). Vorbis: the packets from the one before the packet that holds
+  the first frame; the granule positions of the first and of the last audio page drop the frames outside the
+  segment (Vorbis I, appendix A.2). ffmpeg 6.0 decodes such Opus files to the exact frames; from such Vorbis files
+  it keeps the frames to drop at the start, up to one block (Appendix B).
+- **Large lists**: the comment header is read before the first audio packet. A long list delays the start of
+  streamed playback and may exceed what some programs accept. Sizes of lists observed: 0.7 KB per segment in
+  `kit/samples/tt_v0_many.ogg` (290 KB for 400 segments, 320 KB of comments in all; 92 KB as a table in
+  `tt_v0_many_table.ogg`), 1.75 KB per segment for the voices of Rìcháng, with ten fields (2.8 MB for 1,575
+  segments), and 0.54 KB as a table (Appendix B). In an Ogg Opus file, RFC 7845 (section 5.2) also lets a program ignore every
+  comment that is not entirely within the first 61,440 octets of the comment header, and treat a header larger than
+  120 MB as invalid: an XML list of more than a few dozen segments goes beyond that limit, a table of about a
+  hundred. Writers put the list last, after the summary and the chapters, so that these stay near the start. Test
+  the programs you target with your largest files.
+- **Playing one segment**: a reader can decode only the packets that cover a segment.
+  - It needs the frames of each packet. The granule position of a page is the frame that follows the last packet
+    completed on that page (Opus: pre-skip included); the duration of each packet fills in the rest. Opus: from
+    the TOC byte of the packet (RFC 6716, section 3.1). Vorbis: (previous block size + current block size) / 4,
+    the size of a block given by its mode, whose number opens the packet: the two sizes are in the identification
+    header, the block flag of each mode at the end of the setup header (ffmpeg's Vorbis parser reads it there); the
+    first audio packet returns nothing.
+  - Opus: start decoding at least 3,840 frames (80 ms) before `START_SAMPLE` (RFC 7845, section 4.6) and drop the
+    output up to it. The pre-skip of the `OpusHead` header belongs to the start of the stream: a reader that gives
+    a decoder a stream rebuilt from packets in the middle of the file sets its pre-skip to 0 and drops those
+    frames itself.
+  - Vorbis: start decoding at least one packet before the packet whose output holds `START_SAMPLE`: the first
+    packet a decoder receives only primes it.
+  - Some decoding pipelines also trim the start or the end of a stream on their own, from its granule positions:
+    with Web Audio in Chromium, the reader of Appendix B needed two packets before a Vorbis segment and a few after
+    it. Decode a margin on each side and cut the result to `START_SAMPLE` and `LENGTH_SAMPLES`.
+- **Silence between sounds**: a codec spreads each sound over its neighbours for a few tens of milliseconds (a
+  Vorbis block spreads its coding noise over its whole window: 2,048 frames for a long block with the usual settings
+  at 44.1 and 48 kHz). What counts is the quiet between the end of the loud part of one sound and the start of the
+  next one: 40 ms were enough in Ogg Vorbis and 60 ms in Ogg Opus (Appendix B; with less, the first 20 ms of a sound
+  that starts quiet rose by 5 to 33 dB after a loud end). The quiet edges of the sounds themselves count: sounds
+  that start and end quiet need no silence between them, and a writer that does not check the edges can leave
+  60 ms. In the voice files of Appendix B, each line keeps 50 ms before the voice and 120 ms after it; with no
+  silence added, the edges of a line changed less than two encodings of the same line differ in its middle.
+  Silence has a weight (section 12): in those files, 300 ms cost about 340 bytes per sound in Opus and 75 in
+  Vorbis; 40 ms, about 70 and 45. Keep a little silence before the first sound and after the last one (50 to
+  100 ms): a reader that decodes a margin on each side of a segment finds it there, and it is paid once per file.
 
-## 12. Example
+### 11.5 Segment table
+
+The XML list writes the name of every element in every segment. In an Ogg file it weighs more than the tags the
+same sounds would carry as separate files (section 12, Appendix B). From draft 0.3, an Ogg file MAY hold its
+segment list as a table: one comment `TT_SEGMENT_TABLE` whose value is a JSON object (RFC 8259), in UTF-8, on one
+line. It holds the same data as the list of section 5, every element of every segment: it writes the name of each
+element once, and a value that every segment shares once.
+
+- A file MUST NOT hold both `TT_SEGMENT_TABLE` and `TT_SEGMENT_LIST`, nor more than one of either. `TT_VERSION` is
+  `0.3`. A reader that finds both reports it and uses `TT_SEGMENT_LIST`: a program written for draft 0.2 added it
+  after the table was written.
+- Every value is a JSON string that holds the text of the element, numbers included (`"48000"`). Writers SHOULD NOT
+  escape characters that JSON does not require to escape: an escaped CJK character takes six bytes instead of three.
+- The members `TT_VERSION`, `WRITER`, `SAMPLE_RATE`, `TOTAL_FRAMES`, `AUDIO_SHA256`, `TIME_REFERENCE`,
+  `TIMECODE_RATE`, `TIMECODE_FLAG` and `SEGMENT_COUNT` are the elements of the list header, with the rules of
+  section 5. `XML` (optional) holds every other child of the list but the segments (an element of a single
+  program, an element with children, a repeated element), whole, as XML text.
+- `COLUMNS` is an array of paths (below), each at most once. `NAME`, `START_SAMPLE` and `LENGTH_SAMPLES` MUST be
+  among them.
+- `ROWS` is an array with one array per segment, in ascending `START_SAMPLE` order. Cell k of a row is the value of
+  the segment for path k of `COLUMNS`, or `null` when the segment has none. A row MAY be shorter than `COLUMNS`:
+  the cells it lacks are `null`. A cell that holds an empty string is an element with an empty text.
+- `DEFAULTS` (optional) is an object: for a path, the value of every segment whose cell is `null` or whose row has
+  no such column. That value belongs to each of those segments as if it were written in its row: a program that
+  lists, indexes or splits the segments gives it to each of them. An empty string in a cell overrides it.
+  `DEFAULTS` MUST NOT hold `NAME`, `SEGMENT_ID`, `START_SAMPLE` or `LENGTH_SAMPLES`.
+- `ORDER` (optional) is an array of paths: the order of the elements of a segment in the XML list. A program that
+  writes the XML list from the table writes the elements of each segment in that order, each block (`USER`,
+  `FIELD_LIST`...) where its first path is, and the paths `ORDER` does not hold after the others. The order of the
+  elements of a segment carries no meaning: `ORDER` keeps the order a writer chose to show them in.
+- `ID_NAMESPACE` (optional) is a UUID. With it, a segment whose `SEGMENT_ID` is `null` has the name-based UUID
+  (version 5, RFC 9562) of its `NAME`, as UTF-8, in that namespace (section 5.1). Such segments MUST have distinct
+  names. A program that renames one of them MUST write its `SEGMENT_ID` in the row from then on: the ID of a segment
+  never changes. Without `ID_NAMESPACE`, every segment MUST have a `SEGMENT_ID`.
+- A segment with no `CUE_ID` has `CUE_ID` 0: no chapter.
+
+| Path | Element of section 5 |
+|---|---|
+| `NAME`, `START_SAMPLE`, `LENGTH_SAMPLES`, `SEGMENT_ID`, `CUE_ID`, `STATUS`, `CONFIDENCE`, or the name of an element of a single program | the element of that name, when it holds text only |
+| `<block>/<tag>`: `USER/<tag>`, `ASWG/<tag>`, `ORIGIN/<tag>`, or a block of a single program | the child `<tag>` of that block, when every child of the block holds text only and has a name of its own |
+| `FIELD/<name>` | the `VALUE` of the `FIELD` of `FIELD_LIST` whose `NAME` is `<name>` (the name may contain `/`), when every `FIELD` holds a `NAME` and a `VALUE` only and no two have the same `NAME` |
+| `XML` | every other child of `TT_SEGMENT`, whole, as XML text, one after the other: an element with attributes or deeper children (an `ORIGIN` with a `CHUNK_LIST`), every occurrence of a repeated element (two `USER` blocks, two elements of a program with the same name), a `FIELD_LIST` that the row above cannot express. An element written here is not written in other columns. |
+
+Converting an XML list to a table and back gives every element of every segment, with the same text; with `ORDER`,
+in the same order (the elements of an `XML` cell come back together, where the first of them was). A program that
+converts the file to WAV, or splits it, reads the same segments from either form. Sections 8 and 11.3 apply: a
+rewriter MUST copy the comment unchanged, with the members and the paths it does not know. The kit's
+`--validate` reads both forms; `kit/samples/tt_v0_full_table.opus` and `tt_v0_many_table.ogg` are written this way.
+
+Example, with line breaks here:
+
+```
+TT_SEGMENT_TABLE={"TT_VERSION":"0.3","SAMPLE_RATE":"48000","TOTAL_FRAMES":"132000",
+  "AUDIO_SHA256":"9f2c...e41a","SEGMENT_COUNT":"2",
+  "DEFAULTS":{"USER/CATID":"VOXFem","ORIGIN/SAMPLE_RATE":"24000","ORIGIN/CONVERSION":"lossy"},
+  "COLUMNS":["NAME","START_SAMPLE","LENGTH_SAMPLES","SEGMENT_ID","CUE_ID","USER/FXNAME","ORIGIN/FILENAME"],
+  "ORDER":["SEGMENT_ID","CUE_ID","START_SAMPLE","LENGTH_SAMPLES","NAME","USER/CATID","USER/FXNAME",
+           "ORIGIN/FILENAME","ORIGIN/SAMPLE_RATE","ORIGIN/CONVERSION"],
+  "ROWS":[["VOXFem_Hello there_01","0","72000","3f2b9c1e-5d4a-4e8b-9f1a-2c7d6e5b4a3f","1","Hello there","hello_there_01.wav"],
+          ["VOXFem_Goodbye_01","72000","60000","8a1d0c2e-7b3f-4a5d-8c6e-1f2a3b4c5d6e","2","Goodbye","goodbye_01.wav"]]}
+```
+
+The first row is this segment of the XML list, with the values of `DEFAULTS`:
+
+```xml
+<TT_SEGMENT><SEGMENT_ID>3f2b9c1e-5d4a-4e8b-9f1a-2c7d6e5b4a3f</SEGMENT_ID><CUE_ID>1</CUE_ID>
+  <START_SAMPLE>0</START_SAMPLE><LENGTH_SAMPLES>72000</LENGTH_SAMPLES><NAME>VOXFem_Hello there_01</NAME>
+  <USER><CATID>VOXFem</CATID><FXNAME>Hello there</FXNAME></USER>
+  <ORIGIN><FILENAME>hello_there_01.wav</FILENAME><SAMPLE_RATE>24000</SAMPLE_RATE><CONVERSION>lossy</CONVERSION></ORIGIN>
+</TT_SEGMENT>
+```
+
+## 12. Weight (normative)
+
+A TT file is meant to weigh no more than the same sounds as separate files with the same metadata. This section
+defines the weight of those files, so that a writer can keep to it and a validator can check it.
+
+### 12.1 Reference weight
+
+The reference weight of a TT file is the sum of the sizes of one separate file per segment.
+
+WAV file. For each segment: 12 bytes (RIFF header and form type); the `fmt ` chunk of the TT file; the original
+chunks of its `ORIGIN/CHUNK_LIST` when it has some, otherwise the `bext` chunk of the TT file when it has one and an
+`iXML` chunk made of the XML declaration, `BWFXML`, `IXML_VERSION` and the `USER`, `ASWG` and `FIELD_LIST` elements of
+the segment as the list writes them; a `data` chunk of `LENGTH_SAMPLES` frames. Chunk headers and pad bytes count.
+
+Ogg file. For each segment:
+
+- the header pages of the TT file with a comment header that keeps only its vendor string: identification header,
+  comment header, Vorbis setup header, their page headers and lacing values;
+- its reference tags: for each value of the segment other than `SEGMENT_ID`, `CUE_ID`, `START_SAMPLE` and
+  `LENGTH_SAMPLES`, empty values left out, 4 bytes, the name of the element (the last part of its path in section
+  11.5; the `NAME` of a `FIELD`), 1 byte and the value in UTF-8; what the paths cannot express (the `XML` cell of
+  section 11.5) counts as one value named `XML`;
+- the audio packets that hold its frames, each with its lacing values (one per 255 bytes of the packet, plus one);
+  a packet that also holds frames outside the segment counts in proportion to its frames inside it;
+- 27 bytes per page, for as many pages as these packets fill at the average number of packets per audio page of the
+  TT file, and at least one.
+
+### 12.2 Rule
+
+- A writer SHOULD NOT write a TT file larger than its reference weight when all its audio belongs to its segments
+  (apart from a short silence at each end, section 11.4). When it does, it SHOULD tell the user, with both sizes.
+- A validator reports the size of the file, its reference weight, and the bytes of audio that belong to no segment.
+  The kit's `--validate` prints them on a line `weight (section 12)`.
+
+### 12.3 Keeping to the rule (informative)
+
+In order of effect, on the files of Appendix B:
+
+1. No audio outside the segments. In a WAV file, one millisecond of silence per sound (48 to 288 bytes) weighs more
+   than everything a TT file saves. In an Ogg file, see the note on silence (section 11.4).
+2. In an Ogg Opus file, the table (section 11.5): a separate Opus file spends about 100 bytes on its own headers,
+   less than the XML of one segment. In an Ogg Vorbis file every form keeps to the rule: each separate file repeats
+   a setup header of 3 to 4 KB.
+3. In a file that keeps the original chunks of its sounds, the deflated form (section 5.2): base64 alone makes them
+   a third larger than in the separate files.
+4. What only keeps an order or serves other programs, the least useful first: `ORDER` (section 11.5), the second
+   copy of the description (`COMMENT`), the `note` entries; then the names in the description, `LIST/INFO`; then
+   the chapters. The metadata of the segments is never removed: keeping it is what a TT file is for.
+5. A file of very few segments cannot keep to the rule: it has a list header and nothing to share. In those files,
+   a TT file was the lighter one from 2 segments in Ogg Vorbis, 5 in Ogg Opus and 4 to 14 in WAV.
+
+A recording kept whole, with what lies between its sounds, is heavier than its sounds alone: that is what it is for.
+
+## 13. Example
 
 Chunk layout: `RIFF/WAVE`: `fmt `, `bext`, `iXML`, `cue `, `LIST/adtl`, `LIST/INFO`, `data`.
 
@@ -325,24 +519,64 @@ Marker mirror of the same file: cue 1 at 0, cue 2 at 120000; `labl` 1 = `Door Sl
 `Porte d'entree qui grince` (ASCII); `note` 1 and 2 = the descriptions (ASCII); `ltxt` 1 = 96000 frames,
 `ltxt` 2 = 144000 frames.
 
-## 13. Open questions
+The same in an Ogg Opus file, for a sound whose source has another rate: a voice line recorded at 24 kHz, its
+silence trimmed, placed at 1.1 s. The frames of the file are at 48 kHz (section 11.1), those of `ORIGIN` at the
+rate of the source (section 5.2): the 1.5 s of the line are 72000 frames in the file and 36000 in the source.
+`OpusHead` keeps 24000 as its input rate, which changes nothing to how frames are counted.
+
+```
+CHAPTER002=00:00:01.100
+CHAPTER002NAME=Hello there
+TT_SEGMENT_LIST=<TT_SEGMENT_LIST><TT_VERSION>0.2</TT_VERSION>...</TT_SEGMENT_LIST>
+```
+
+The value of `TT_SEGMENT_LIST`, on one line in the file, with line breaks here:
+
+```xml
+<TT_SEGMENT_LIST>
+  <TT_VERSION>0.2</TT_VERSION>
+  <SAMPLE_RATE>48000</SAMPLE_RATE>
+  <TOTAL_FRAMES>480000</TOTAL_FRAMES>
+  ...
+  <TT_SEGMENT>
+    <SEGMENT_ID>...</SEGMENT_ID>
+    <CUE_ID>2</CUE_ID>
+    <START_SAMPLE>52800</START_SAMPLE>
+    <LENGTH_SAMPLES>72000</LENGTH_SAMPLES>
+    <NAME>VOXFem_Hello there_01</NAME>
+    <ORIGIN>
+      <FILENAME>hello_there_01.wav</FILENAME>
+      <START_SAMPLE>1200</START_SAMPLE>
+      <LENGTH_SAMPLES>36000</LENGTH_SAMPLES>
+      <SAMPLE_RATE>24000</SAMPLE_RATE>
+      <CONVERSION>lossy</CONVERSION>
+      <CONVERSION_NOTE>silence trimmed, 24000 Hz to Ogg Opus (48000 Hz)</CONVERSION_NOTE>
+    </ORIGIN>
+  </TT_SEGMENT>
+</TT_SEGMENT_LIST>
+```
+
+## 14. Open questions
 
 1. **Carrier**: iXML only, or also a dedicated RIFF chunk carrying the same XML (candidate ID `ttsg`), for
    programs that drop unknown iXML elements when they rewrite a file. To be decided from tests in more programs
    (Appendix B; the test kit is in `kit/`).
 2. **Analysis data**: lanes, groups, frequency bands and species as common elements, or left to each program?
-3. **Other formats**: FLAC (Vorbis comments, close to section 11), AIFF, BW64 with ADM, Matroska / WebM, and a
+3. **Other formats**: FLAC (Vorbis comments, close to section 11; in a test, 75 voice lines in one FLAC file weighed
+   17 % less than the same lines as separate FLAC files, Appendix B), AIFF, BW64 with ADM, Matroska / WebM, and a
    sidecar file for formats without room for metadata.
 4. **Registration**: propose the object to the iXML committee, as Sony did for its ASWG object (added to the
    iXML specification in revision 3.01, October 2021).
-5. **Ogg carrier**: one comment for the whole list, or one comment per segment for tag editors that limit the
-   length of a value? To be decided from tests in game engines, audio middleware and tag editors.
+5. **Compressed list**: the list or the table deflated before base64 would make an Ogg Opus file 3 to 4 % lighter
+   again, at the price of a value that can no longer be read as text. The weight rule does not need it (section 12).
 
 Decided: the name (TT File Format, elements `TT_SEGMENT_LIST` and `TT_SEGMENT`); the original chunks of a segment
 (`ORIGIN/CHUNK_LIST`) stay in version 1 as an option; Ogg files carry the same list in a Vorbis comment (section
-11); the licences (section 14).
+11), in one comment, not one per segment (question 5 of draft 0.2): ffmpeg joins comments of the same name with `;`
+when it rewrites a file, and RFC 7845 lets an Ogg Opus program keep the start of a list cut into several comments
+and drop the rest without notice (Appendix B); the licences (section 15).
 
-## 14. Licence
+## 15. Licence
 
 This specification is published under the Creative Commons Attribution 4.0 International licence (CC BY 4.0):
 <https://creativecommons.org/licenses/by/4.0/>. The code of the test kit (`kit/`) is published under the MIT
@@ -364,7 +598,7 @@ AudioCrucible 1.0.12 writes `<AUDIOCRUCIBLE_TAGS version="1">` (attributes `app`
 | `TAG/COLUMN@name` + text | `FIELD_LIST/FIELD` (`NAME`, `VALUE`), or `USER` / `ASWG` when the name is a known field |
 | `TAG/SOURCE@file`, `@start_sample`, `@end_sample`, `@sample_rate` | `ORIGIN` (`FILENAME`, `START_SAMPLE`, `LENGTH_SAMPLES`, `SAMPLE_RATE`) |
 | `TAG@status`, `@confidence` | `STATUS`, `CONFIDENCE` |
-| `TAG@lane`, `@low_hz`, `@high_hz`, `@group`, `@occurrences`, `TAG/SPECIES` | program-specific elements (`AUDIOCRUCIBLE_...`), see question 4 |
+| `TAG@lane`, `@low_hz`, `@high_hz`, `@group`, `@occurrences`, `TAG/SPECIES` | program-specific elements (`AUDIOCRUCIBLE_...`), see question 2 |
 
 ## Appendix B. Interoperability observed (informative)
 
@@ -378,9 +612,50 @@ compares a file rewritten by a program with the original). Results so far:
 Other programs (Soundminer, BaseHead, REAPER, iZotope RX, Pro Tools, Nuendo / WaveLab) are not tested yet.
 Results for them are welcome: see `kit/TEST_PROTOCOL.md`.
 
-Ogg samples (draft 0.2): ffmpeg 6.0 (ffprobe) lists their chapters, 5 in `tt_v0_full.ogg` and `tt_v0_full.opus`
-and 400 in `tt_v0_many.ogg`, and decodes the three files without error. No other program is tested yet; game
-engines, audio middleware and tag editors are the most wanted.
+Ogg files (draft 0.2):
+
+- ffmpeg 6.0 as a reader (ffprobe): lists the chapters of the samples, 5 in `tt_v0_full.ogg` and `tt_v0_full.opus`
+  and 400 in `tt_v0_many.ogg`, and decodes the three files without error. It reads comment headers of 2.9 MB. It
+  reads three digits after `CHAPTER`: in a test file, `CHAPTER1000NAME` to `CHAPTER1009NAME` all renamed chapter
+  100, and `CHAPTER1000` to `CHAPTER1011` were ignored (2026-11-12).
+- ffmpeg 6.0 as a rewriter (`-c copy`, 2026-11-12): the segment list (2.7 MB included), the summary and the audio
+  packets are kept (`AUDIO_SHA256` and `TOTAL_FRAMES` unchanged), the chapters are not. To Ogg Vorbis it drops them
+  all. To Ogg Opus it numbers them again from `CHAPTER000`, so each `CUE_ID` points to the next chapter, and writes
+  those whose millisecond part is 500 or more one second late (0.5 s becomes `00:00:01.500`); it writes 1,000
+  chapters at most, then `CHAPTER100` again. Readers then report the segments as moved (section 8).
+- [Rìcháng](https://github.com/Bannl/Richang), a game to learn Taiwan Mandarin (2026-11-11): the first Ogg TT files
+  written outside the kit and AudioCrucible, the dubbed lines of each character in Ogg Vorbis and in Ogg Opus (72
+  files, 33 to 1,575 segments, lists of 57 KB to 2.8 MB), read in the browser by a reader that decodes only the
+  packets of a segment.
+  All pass `--validate` with no warning; their positions, checked against a full decode by ffmpeg, are exact to
+  the frame in Vorbis and within 1 ms in Opus. They brought the rules on chapter times and numbers (section 11.2)
+  and the notes on playing one segment (section 11.4). Details in `CASE_STUDY_RICHANG.md`.
+- ffmpeg 6.0 as a rewriter, again (2026-11-12): it keeps `TT_SEGMENT_TABLE` byte for byte; it joins comments of
+  the same name with `;`, and drops data placed after the comments of `OpusTags` (RFC 7845, section 5.2). From an
+  Ogg Opus segment cut by packet copy (section 11.4) it decodes the exact frames; from an Ogg Vorbis segment cut the
+  same way it keeps up to one block too many at the start.
+
+Weight against separate files (2026-11-12, draft 0.3): the voice files of Rìcháng, rebuilt from their sources with
+the same audio settings, and 475 sound effects of a test library, against the same sounds as separate files with
+the same metadata.
+
+| Files | As written before | With draft 0.3 |
+|---|---|---|
+| Rìcháng voices, Ogg Opus, 36 files, 4,725 lines | 16.4 % heavier (XML list, 300 ms between lines) | 7.4 % lighter (table, no silence added); no file heavier |
+| Rìcháng voices, Ogg Vorbis, 36 files | 21.2 % lighter | 32.1 % lighter |
+| Rìcháng voices in WAV (model and prototype, no silence) | 0.09 % lighter | unchanged |
+| 475 sound effects in WAV, original chunks kept (estimated from their chunks) | 0.26 % heavier (base64) | 0.69 % lighter (deflated) |
+
+Rìcháng now ships its voices this way: 36 Ogg Opus files with a segment table and no silence added (4,728 lines with
+its tutorial, 3 h 14 min), 32.9 MB, 5.2 % lighter than their reference weight (section 12.1); every file is lighter,
+from 4.1 % to 7.5 %, and all pass `--validate` with no warning. Every list of its files, converted to a table and
+back, gave every element and value in the same order.
+Without silence between lines, the edges of a line changed less than two encodings of the same line differ in its
+middle; after a loud end, the next sound needed 40 ms (Vorbis) and 60 ms (Opus) of quiet. Deflated, the XMP packets
+of the sound effects took 15 % of their bytes, their `bext` chunks 18 %. In FLAC, 75 lines in one file weighed 17 %
+less than as separate FLAC files. Method and full results in `CASE_STUDY_RICHANG.md`.
+
+Game engines, audio middleware and tag editors are not tested yet and are the most wanted.
 
 ## Appendix C. Alternatives considered (informative)
 

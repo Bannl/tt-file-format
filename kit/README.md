@@ -1,7 +1,7 @@
 # Test kit
 
-The sample files are already in [samples/](samples/) (3 WAV files, 3 Ogg files and `manifest.json`, the expected
-content). The Ogg samples are made from the encoded audio in [ogg_audio/](ogg_audio/): the kit only rewrites their
+The sample files are already in [samples/](samples/) (3 WAV files, 5 Ogg files, two of them with the list as a
+table of draft 0.3, and `manifest.json`, the expected content). The Ogg samples are made from the encoded audio in [ogg_audio/](ogg_audio/): the kit only rewrites their
 comments (kit maintainers re-encode that audio with `--make-ogg-audio`, which needs ffmpeg).
 
 `make_tt_spec_samples.py` needs Python 3.7 or later and nothing else (standard library only). It writes only inside

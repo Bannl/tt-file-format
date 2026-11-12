@@ -10,12 +10,22 @@ welcome as issues.
 | BaseHead | not tested |  |  |  |
 | REAPER | not tested |  |  |  |
 | iZotope RX | not tested |  |  |  |
-
-Ogg samples (draft 0.2): ffmpeg 6.0 (ffprobe) lists their chapters (5 in `tt_v0_full.ogg` and `tt_v0_full.opus`,
-400 in `tt_v0_many.ogg`) and decodes the three files without error. Game engines (Unity, Unreal, Godot), audio
-middleware (FMOD, Wwise) and tag editors are not tested yet.
 | Pro Tools | not tested |  |  |  |
 | Nuendo / WaveLab | not tested |  |  |  |
+
+## Ogg files
+
+| Program | As | Result |
+|---|---|---|
+| ffmpeg 6.0 (ffprobe), 2026-11-04 | reader | lists the chapters of the three Ogg samples (5, 5 and 400) and decodes them without error |
+| ffmpeg 6.0 (ffprobe), 2026-11-12 | reader | reads three digits after `CHAPTER`: `CHAPTER1000NAME` to `CHAPTER1009NAME` rename chapter 100, `CHAPTER1000` is ignored; reads the 2.9 MB comment headers of the Rìcháng voice files without error |
+| ffmpeg 6.0, `-c copy`, 2026-11-12 | rewriter | keeps the segment list, the summary and the audio packets; drops every chapter (to Ogg Vorbis), or numbers them again from `CHAPTER000` and writes those whose millisecond part is 500 or more one second late (to Ogg Opus); 1,000 chapters at most |
+| [Rìcháng](https://github.com/Bannl/Richang) voice files, 2026-11-11 | writer and reader | 72 files of draft 0.2, all `RESULT PASS` with no warning; details in [CASE_STUDY_RICHANG.md](CASE_STUDY_RICHANG.md) |
+| [Rìcháng](https://github.com/Bannl/Richang) voice files, 2026-11-12 | writer and reader, draft 0.3 | 36 Ogg Opus files with a segment table, all `RESULT PASS` with no warning, 5.2 % lighter than their reference weight; details in [CASE_STUDY_RICHANG.md](CASE_STUDY_RICHANG.md) |
+| ffmpeg 6.0, `-c copy`, 2026-11-12 | rewriter, draft 0.3 | keeps `TT_SEGMENT_TABLE` byte for byte; joins comments of the same name with `;` (five `TT_SEGMENT` comments became one); drops data placed after the comments of `OpusTags` |
+| ffmpeg 6.0, 2026-11-12 | reader of segments cut by packet copy | Ogg Opus: decoded to the exact frames (75 segments of 75); Ogg Vorbis: the segment intact, but up to one block of frames too many at the start (the granule position of the first page is not applied) |
+
+Game engines (Unity, Unreal, Godot), audio middleware (FMOD, Wwise) and tag editors are not tested yet.
 
 ## Soundly, details
 
@@ -32,3 +42,10 @@ middleware (FMOD, Wwise) and tag editors are not tested yet.
   cue=CHANGED adtl=CHANGED order=CHANGED extra=none`): audio, `bext`, `LIST/INFO`, iXML with the segment list,
   `ttsg` and `_PMX` kept byte for byte; the existing cue points and `LIST/adtl` entries kept; the new cue point got
   a free ID and its `labl` was appended after the `note` and `ltxt` entries; the `cue ` chunk moved after `data`.
+
+## Rìcháng
+
+The dubbed voice lines of [Rìcháng](https://github.com/Bannl/Richang), a game to learn Taiwan Mandarin, are the first
+Ogg TT files written outside the kit and AudioCrucible (2026-11-11), and the data set of the weight study of draft 0.3:
+the files, the method and the results against separate files in WAV, Ogg Vorbis and Ogg Opus are in
+[CASE_STUDY_RICHANG.md](CASE_STUDY_RICHANG.md).

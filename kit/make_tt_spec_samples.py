@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""make_tt_spec_samples.py: sample files for the TT File Format draft 0.2 (../SPEC.md), a checker and a validator.
+"""make_tt_spec_samples.py: sample files for the TT File Format draft 0.3 (../SPEC.md), a checker and a validator.
 
-    py -I make_tt_spec_samples.py                          writes samples/ (3 WAV, 3 Ogg, manifest.json) and SELFCHECK.txt
+    py -I make_tt_spec_samples.py                          writes samples/ (3 WAV, 5 Ogg, manifest.json) and SELFCHECK.txt
     py -I make_tt_spec_samples.py --check FILE [--as NAME] compares a copy that went through another program
     py -I make_tt_spec_samples.py --validate FILE          checks ANY TT file (WAV or Ogg) against the specification
     py -I make_tt_spec_samples.py --make-ogg-audio         kit maintainers only: encodes ogg_audio/ again (needs ffmpeg)
@@ -18,6 +18,7 @@ Copyright 2026 Nextale Audio. MIT licence (see ../LICENSE.md).
 import argparse
 import array
 import base64
+import bisect
 import contextlib
 import hashlib
 import io
@@ -25,12 +26,14 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
+import zlib
 from xml.sax.saxutils import escape as xml_escape
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +62,19 @@ OGG_MANY = "tt_v0_many.ogg"
 OGG_SAMPLES = [(OGG_FULL, "full", "full_vorbis.ogg", "TT Doors", ("lossy", "PCM to Vorbis")),
                (OPUS_FULL, "full", "full_opus.opus", "TT Doors", ("lossy", "PCM to Opus")),
                (OGG_MANY, "many", "many_vorbis.ogg", "TT Impacts", ("lossy", "PCM to Vorbis"))]
+
+# Draft 0.3 (2026-11-12): the segment table (section 11.5) and original chunks deflated before base64 (section 5.2)
+TABLE_SPEC_VERSION = "0.3"
+TABLE_WRITER = "TT spec sample kit 2026-11-12"
+OPUS_FULL_TABLE = "tt_v0_full_table.opus"
+OGG_MANY_TABLE = "tt_v0_many_table.ogg"
+TABLE_SAMPLES = [(OPUS_FULL_TABLE, OPUS_FULL), (OGG_MANY_TABLE, OGG_MANY)]   # (table sample, Ogg sample it is made from)
+LIST_KEY, TABLE_KEY = "TT_SEGMENT_LIST", "TT_SEGMENT_TABLE"
+# The bext of the source of segment 1 (segment_lines) deflated (zlib, level 9) then in base64. A constant, so that the
+# samples are the same bytes whatever zlib the Python build carries; the self-check inflates it and compares.
+SRC_BEXT_DEFLATED = ("eNrzL8pMz8xLzFEoSk3OL0rJzEtXyE9TSFRIyc8vUijOScxlGN4gJEShuCA1WaHMQCE7swRTPjjIWdfAwMAQl34jAyMzXUMDXSMjQwMr"
+                     "AxBieOFdCJJhZBjZwNE2wNlXx83WxAIYfjrhtkYmOr62xSWpRan5vFwAw90fUg==")
+MAX_INFLATED = 64 << 20          # a reader MAY refuse a deflated chunk beyond 64 MiB (section 5.2)
 
 TOKENS = {
     "file": "zorbfile",          # file-level summary only (bext, LIST/INFO, iXML USER and ASWG)
@@ -265,6 +281,11 @@ def el(tag, text):
     return "<%s>%s</%s>" % (tag, xml_escape(str(text)), tag)
 
 
+def src_bext_body(s):
+    """The bext chunk of the source of segment 1, its original chunk in ORIGIN/CHUNK_LIST."""
+    return bext_body("Original recording of a door slam", "SRC-0001", s["src_tref"], "A=PCM,F=48000,W=24,M=stereo\r\n")
+
+
 def segment_lines(s, variant, rich, cue_id=None, conversion=None):
     """`variant` ("ixml", "chunk" or "ogg") picks the search word of segment 3; `cue_id` and `conversion`
     ((CONVERSION, CONVERSION_NOTE)) replace the segment's own values when given (Ogg samples)."""
@@ -298,10 +319,8 @@ def segment_lines(s, variant, rich, cue_id=None, conversion=None):
         if note:
             lines.append(el("CONVERSION_NOTE", note))
         if s["n"] == 1:
-            src_bext = bext_body("Original recording of a door slam", "SRC-0001", s["src_tref"],
-                                 "A=PCM,F=48000,W=24,M=stereo\r\n")
             lines += ["<CHUNK_LIST>", "<CHUNK>", el("CHUNK_ID", "bext"),
-                      el("DATA_BASE64", base64.b64encode(src_bext).decode("ascii")), "</CHUNK>", "</CHUNK_LIST>"]
+                      el("DATA_BASE64", base64.b64encode(src_bext_body(s)).decode("ascii")), "</CHUNK>", "</CHUNK_LIST>"]
     lines.append("</ORIGIN>")
     lines.append(el("STATUS", "accepted"))
     if rich and s["n"] == 2:
@@ -1070,12 +1089,33 @@ def ogg_chapters(cm):
     return out
 
 
+def chapter_ms(frames, rate):
+    """Start of a chapter in whole milliseconds (section 11.2): frames * 1000 / rate rounded to the nearest, a start
+    exactly on a half millisecond to the even one (as Python's round). Integers: no floating-point error."""
+    q, r = divmod(frames * 1000, rate)
+    return q + 1 if 2 * r > rate or (2 * r == rate and q % 2) else q
+
+
 def chapter_time(frames, rate):
-    ms = int(round(frames * 1000.0 / rate))
+    ms = chapter_ms(frames, rate)
     h, rest = divmod(ms, 3600000)
     m, rest = divmod(rest, 60000)
     s, ms = divmod(rest, 1000)
     return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+
+CHAPTER_TIME = re.compile(r"(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{3})")
+
+
+def chapter_at(text, frames, rate, tolerance_ms=0.5):
+    """True when the chapter time `text` is at most `tolerance_ms` away from the start `frames` (section 11.2):
+    0.5 for a writer (the nearest millisecond, either neighbour when the start is exactly on a half millisecond:
+    JavaScript and C++ round it up, the kit to even), 1 for a reader. None when `text` is not HH:MM:SS.mmm."""
+    m = CHAPTER_TIME.fullmatch(text)
+    if not m:
+        return None
+    h, mi, s, ms = (int(g) for g in m.groups())
+    return abs((((h * 60 + mi) * 60 + s) * 1000 + ms) * rate - frames * 1000) <= tolerance_ms * rate
 
 
 def paginate_headers(packets, max_segments=255):
@@ -1131,6 +1171,25 @@ def ogg_flip_audio_byte(data):
     return data[:off] + page[:22] + struct.pack("<I", ogg_crc(page)) + page[26:] + data[off + len(raw):]
 
 
+def ogg_moved_segment(data, delta, chapter_text=None):
+    """Self-check helper: the first segment of the list starts `delta` frames later, its chapter at `chapter_text`
+    (None: unchanged)."""
+    comments = read_ogg(data)["comments"]
+    key = lambda c: c.partition("=")[0].upper()          # noqa: E731
+    root = ET.fromstring(next(c for c in comments if key(c) == "TT_SEGMENT_LIST").partition("=")[2])
+    seg = root.find("TT_SEGMENT")
+    seg.find("START_SAMPLE").text = str(int(seg.find("START_SAMPLE").text) + delta)
+    chapter = "CHAPTER%03d" % int(seg.find("CUE_ID").text)
+    out = []
+    for c in comments:
+        if key(c) == "TT_SEGMENT_LIST":
+            c = "TT_SEGMENT_LIST=" + ET.tostring(root, encoding="unicode")
+        elif chapter_text is not None and key(c) == chapter:
+            c = chapter + "=" + chapter_text
+        out.append(c)
+    return ogg_with_comments(data, out)
+
+
 def ogg_segments(key, fsegs, msegs):
     """Copies of the WAV samples' segments with the Ogg search words -> (segments, rich, foreign marker)."""
     if key == "full":
@@ -1166,15 +1225,583 @@ def ogg_tt_comments(segs, total, rate, audio_sha, rich, title, foreign=None, con
     return comments
 
 
+# ---------------------------------------------------------------------------------------------
+# Draft 0.3: the segment table (section 11.5), deflated original chunks (section 5.2), the weight (section 12)
+# ---------------------------------------------------------------------------------------------
+
+TABLE_HEADER = ("TT_VERSION", "WRITER", "SAMPLE_RATE", "TOTAL_FRAMES", "AUDIO_SHA256", "TIME_REFERENCE", "TIMECODE_RATE",
+                "TIMECODE_FLAG", "SEGMENT_COUNT")
+STRUCTURAL = ("SEGMENT_ID", "CUE_ID", "START_SAMPLE", "LENGTH_SAMPLES")
+
+
+def _plain_leaf(e):
+    """An element that holds text only: no child, no attribute."""
+    return len(e) == 0 and not e.attrib
+
+
+def _xml_text(e):
+    """An element as XML text on its own, without the text that follows it in its parent (its tail)."""
+    tail, e.tail = e.tail, None
+    try:
+        return ET.tostring(e, encoding="unicode")
+    finally:
+        e.tail = tail
+
+
+def _paths_of(e):
+    """The (path, text) pairs of a child of TT_SEGMENT that appears once, or None when the paths of section 11.5
+    cannot express it."""
+    if e.attrib or e.tag == "XML":
+        return None
+    if len(e) == 0:
+        return [(e.tag, e.text or "")]
+    if (e.text or "").strip():
+        return None                                          # text and children mixed
+    kids = list(e)
+    if e.tag == "FIELD_LIST":
+        names = [f.findtext("NAME") or "" for f in kids]
+        simple = all(f.tag == "FIELD" and not f.attrib and not (f.text or "").strip()
+                     and [x.tag for x in f] == ["NAME", "VALUE"] and all(_plain_leaf(x) for x in f) for f in kids)
+        if simple and len(set(names)) == len(names):
+            return [("FIELD/" + n, f.findtext("VALUE") or "") for n, f in zip(names, kids)]
+        return None
+    if e.tag != "FIELD" and all(_plain_leaf(x) for x in kids) and len({x.tag for x in kids}) == len(kids):
+        return [(e.tag + "/" + x.tag, x.text or "") for x in kids]   # USER, ASWG, ORIGIN, a block of a program
+    return None
+
+
+def segment_pairs(seg):
+    """A TT_SEGMENT element as (path, text) pairs, in the order of its elements. What the paths cannot express goes
+    whole, as XML text, into one ("XML", text) pair, where the first such element was: an element with attributes or
+    deeper children (an ORIGIN with a CHUNK_LIST), every occurrence of a repeated element, a FIELD_LIST with a repeated
+    field name or a FIELD that is not NAME and VALUE."""
+    counts = {}
+    for e in seg:
+        counts[e.tag] = counts.get(e.tag, 0) + 1
+    out, extra, at = [], [], None
+    for e in seg:
+        pairs = _paths_of(e) if counts[e.tag] == 1 else None
+        if pairs is None:
+            if at is None:
+                at = len(out)
+                out.append(None)
+            extra.append(_xml_text(e))
+        else:
+            out += pairs
+    if extra:
+        out[at] = ("XML", "".join(extra))
+    return out
+
+
+def list_model(listel):
+    """TT_SEGMENT_LIST element -> (header {name: text}, segments [[(path, text)]]). The header holds the elements of the
+    list header (section 5) that appear once with text only; every other child of the list but the segments goes
+    whole, as XML text, into header["XML"]."""
+    kids = [e for e in listel if e.tag != "TT_SEGMENT"]
+    counts = {}
+    for e in kids:
+        counts[e.tag] = counts.get(e.tag, 0) + 1
+    header, extra = {}, []
+    for e in kids:
+        if e.tag in TABLE_HEADER and counts[e.tag] == 1 and _plain_leaf(e):
+            header[e.tag] = e.text or ""
+        else:
+            extra.append(_xml_text(e))
+    if extra:
+        header["XML"] = "".join(extra)
+    return header, [segment_pairs(s) for s in listel.findall("TT_SEGMENT")]
+
+
+def list_xml(header, segments):
+    """(header, segments) -> the XML list of section 5 on one line: the header elements, the other elements of the
+    list, then each segment with its elements in the order of its pairs (a block where its first path is)."""
+    out = ["<TT_SEGMENT_LIST>"] + [el(k, v) for k, v in header.items() if k != "XML"]
+    if header.get("XML"):
+        out.append(header["XML"])
+    for pairs in segments:
+        out.append("<TT_SEGMENT>")
+        groups, order = {}, []
+        for path, value in pairs:
+            head, sep, tail = path.partition("/")
+            if path == "XML":
+                order.append(("raw", value))
+            elif not sep:
+                order.append(("leaf", el(head, value)))
+            else:
+                g = "FIELD_LIST" if head == "FIELD" else head
+                if g not in groups:
+                    groups[g] = []
+                    order.append(("group", g))
+                groups[g].append("<FIELD>%s%s</FIELD>" % (el("NAME", tail), el("VALUE", value)) if head == "FIELD"
+                                 else el(tail, value))
+        for kind, x in order:
+            out.append("<%s>%s</%s>" % (x, "".join(groups[x]), x) if kind == "group" else x)
+        out.append("</TT_SEGMENT>")
+    out.append("</TT_SEGMENT_LIST>")
+    return "".join(out)
+
+
+def _merged_order(segments):
+    """One order of the paths for every segment: each path right after the path that precedes it where it first
+    appears (segments written by one program share their order)."""
+    order, seen = [], set()
+    for pairs in segments:
+        prev = None
+        for path, _v in pairs:
+            if path not in seen:
+                order.insert(order.index(prev) + 1 if prev is not None else 0, path)
+                seen.add(path)
+            prev = path
+    return order
+
+
+def table_text(header, segments, id_namespace=None, keep_order=True):
+    """(header, segments) -> the value of a TT_SEGMENT_TABLE comment (section 11.5): the values every segment shares in
+    DEFAULTS, the others in COLUMNS and ROWS (the columns that most segments fill first, trailing nulls dropped), ORDER
+    when the table read back would give the elements of a segment in another order. id_namespace: SEGMENT_ID left
+    out where every one is the name-based UUID of its NAME in that namespace."""
+    segs = [list(p) for p in segments]
+    head = dict(header)
+    if id_namespace:
+        ns = uuid.UUID(id_namespace)
+        names = [dict(p).get("NAME", "") for p in segs]
+        if len(set(names)) == len(names) and all(dict(p).get("SEGMENT_ID") == str(uuid.uuid5(ns, n))
+                                                 for p, n in zip(segs, names)):
+            segs = [[pv for pv in p if pv[0] != "SEGMENT_ID"] for p in segs]
+            head["ID_NAMESPACE"] = id_namespace
+    shared = {}
+    if len(segs) > 1:
+        maps = [dict(p) for p in segs]
+        for path, value in segs[0]:
+            if path not in STRUCTURAL and path not in ("NAME", "XML") and all(m.get(path) == value for m in maps[1:]):
+                shared[path] = value
+    columns, count = [], {}
+    for p in segs:
+        for path, _v in p:
+            if path in shared:
+                continue
+            if path not in count:
+                columns.append(path)
+                count[path] = 0
+            count[path] += 1
+    columns.sort(key=lambda k: -count[k])                    # stable: equal counts keep their order
+    rows = []
+    for p in segs:
+        d = dict(p)
+        row = [d.get(k) for k in columns]
+        while row and row[-1] is None:
+            row.pop()
+        rows.append(row)
+    obj = dict(head)
+    if shared:
+        obj["DEFAULTS"] = shared
+    obj["COLUMNS"] = columns
+    obj["ROWS"] = rows
+    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    if keep_order:
+        _h, back = table_model(text)
+        if any([k for k, _v in b] != [k for k, _v in s] for b, s in zip(back, segments)):
+            del obj["ROWS"]
+            obj["ORDER"] = _merged_order(segments)
+            obj["ROWS"] = rows
+            text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
+def table_model(text, problems=None):
+    """The value of a TT_SEGMENT_TABLE comment -> (header, segments) as list_model gives them, the elements of each
+    segment in the order of ORDER. `problems` (a list) receives what breaks a rule of section 11.5. ValueError when the
+    value cannot be read as a table at all."""
+    report = problems.append if problems is not None else (lambda _msg: None)
+    try:
+        obj = json.loads(text)
+    except ValueError as e:
+        raise ValueError("not JSON (%s)" % e)
+    if not isinstance(obj, dict):
+        raise ValueError("not a JSON object")
+    columns, rows = obj.get("COLUMNS"), obj.get("ROWS")
+    defaults, order = obj.get("DEFAULTS", {}), obj.get("ORDER", [])
+    if not (isinstance(columns, list) and all(isinstance(c, str) for c in columns)):
+        raise ValueError("COLUMNS is not an array of paths")
+    if not (isinstance(rows, list) and all(isinstance(r, list) for r in rows)):
+        raise ValueError("ROWS is not an array of rows")
+    if not (isinstance(defaults, dict) and all(isinstance(v, str) for v in defaults.values())):
+        raise ValueError("DEFAULTS is not an object of strings")
+    if not (isinstance(order, list) and all(isinstance(p, str) for p in order)):
+        raise ValueError("ORDER is not an array of paths")
+    if len(set(columns)) != len(columns):
+        report("a path appears twice in COLUMNS")
+    for need in ("NAME", "START_SAMPLE", "LENGTH_SAMPLES"):
+        if need not in columns:
+            report("%s is not among COLUMNS" % need)
+    for gone in ("NAME", "SEGMENT_ID", "START_SAMPLE", "LENGTH_SAMPLES"):
+        if gone in defaults:
+            report("DEFAULTS holds %s" % gone)
+    ns = obj.get("ID_NAMESPACE")
+    if ns is not None:
+        try:
+            ns = uuid.UUID(ns)
+        except (ValueError, TypeError, AttributeError):
+            report("ID_NAMESPACE is not a UUID")
+            ns = None
+    header = {}
+    for k, v in obj.items():
+        if k in ("DEFAULTS", "COLUMNS", "ORDER", "ROWS", "ID_NAMESPACE"):
+            continue
+        if isinstance(v, str):
+            header[k] = v                                    # a member not known here: a header element of a later draft
+        else:
+            report("member %s is not a string" % k)
+    rank = {p: i for i, p in enumerate(order)}
+    segments, derived = [], []
+    for r, row in enumerate(rows, 1):
+        if len(row) > len(columns):
+            report("row %d has more cells than COLUMNS" % r)
+        if not all(c is None or isinstance(c, str) for c in row):
+            report("row %d has a cell that is neither a string nor null" % r)
+        pairs = [(k, row[i]) for i, k in enumerate(columns) if i < len(row) and isinstance(row[i], str)]
+        have = {k for k, _v in pairs}
+        pairs += [(k, v) for k, v in defaults.items() if k not in have]
+        have.update(defaults)
+        if "SEGMENT_ID" not in have and ns is not None:
+            name = dict(pairs).get("NAME", "")
+            pairs.append(("SEGMENT_ID", str(uuid.uuid5(ns, name))))
+            derived.append(name)
+        if "CUE_ID" not in have:
+            pairs.append(("CUE_ID", "0"))
+        if rank:
+            pairs.sort(key=lambda pv: rank.get(pv[0], len(rank)))   # stable: the paths ORDER lacks keep their order
+        segments.append(pairs)
+    if len(set(derived)) != len(derived):
+        report("segments whose SEGMENT_ID derives from their NAME do not all have distinct names")
+    return header, segments
+
+
+def ogg_list_of(cm):
+    """-> (comment name, values) of the segment list of an Ogg file: TT_SEGMENT_LIST, else TT_SEGMENT_TABLE."""
+    if cm.get(LIST_KEY):
+        return LIST_KEY, cm[LIST_KEY]
+    if cm.get(TABLE_KEY):
+        return TABLE_KEY, cm[TABLE_KEY]
+    return None, []
+
+
+def ogg_list_element(key, text):
+    """The TT_SEGMENT_LIST element of a list comment (rebuilt from the table for TT_SEGMENT_TABLE). ValueError or
+    ET.ParseError when it cannot be read."""
+    if key == TABLE_KEY:
+        header, segments = table_model(text)
+        return ET.fromstring(list_xml(header, segments))
+    return ET.fromstring(text)
+
+
+def inflate_bounded(raw, limit=MAX_INFLATED):
+    """A zlib stream (RFC 1950) -> its bytes. ValueError when it is not one, or holds more than `limit` bytes."""
+    d = zlib.decompressobj()
+    try:
+        out = d.decompress(raw, limit + 1)
+    except zlib.error as e:
+        raise ValueError("not a zlib stream (%s)" % e)
+    if len(out) > limit:
+        raise ValueError("it inflates beyond %d bytes" % limit)
+    if not d.eof:
+        raise ValueError("the zlib stream is cut short")
+    return out
+
+
+def deflate_origin_chunks(listel, known=None):
+    """Writer side of section 5.2: each DATA_BASE64 of ORIGIN/CHUNK_LIST that is longer than the same chunk deflated
+    becomes DATA_DEFLATE_BASE64. `known`: {chunk body: deflated base64} to use instead of zlib. -> chunks deflated."""
+    n = 0
+    for c in listel.iter("CHUNK"):
+        d = c.find("DATA_BASE64")
+        if d is None:
+            continue
+        raw = base64.b64decode(d.text or "")
+        z = (known or {}).get(raw) or base64.b64encode(zlib.compress(raw, 9)).decode("ascii")
+        if len(z) < len(d.text or ""):
+            d.tag, d.text = "DATA_DEFLATE_BASE64", z
+            n += 1
+    return n
+
+
+def origin_chunks(seg):
+    """The chunks of ORIGIN/CHUNK_LIST of a flattened segment (canon_list) -> (problems, chunks deflated, chunks with
+    neither DATA_BASE64 nor DATA_DEFLATE_BASE64)."""
+    groups = {}
+    for key, value in seg.items():
+        head, _sep, leaf = key.rpartition("/")
+        if "/CHUNK_LIST#" in "/" + head and head.rsplit("/", 1)[-1].startswith("CHUNK#"):
+            groups.setdefault(head, {})[leaf] = value
+    problems, deflated, unknown = [], 0, 0
+    for leaves in groups.values():
+        cid = leaves.get("CHUNK_ID#0", "?")
+        if "DATA_BASE64#0" in leaves:
+            try:
+                base64.b64decode(leaves["DATA_BASE64#0"], validate=True)
+            except Exception:                          # noqa: BLE001 (report, do not stop)
+                problems.append("ORIGIN chunk %s is not valid base64" % cid)
+        elif "DATA_DEFLATE_BASE64#0" in leaves:
+            deflated += 1
+            try:
+                inflate_bounded(base64.b64decode(leaves["DATA_DEFLATE_BASE64#0"], validate=True))
+            except Exception as e:                     # noqa: BLE001 (report, do not stop)
+                problems.append("ORIGIN chunk %s: DATA_DEFLATE_BASE64 is not a zlib stream in base64 (%s)" % (cid, e))
+        else:
+            unknown += 1
+    return problems, deflated, unknown
+
+
+def check_chunk_forms(version, deflated, unknown, warn, note):
+    """Validator lines on the forms of the original chunks of a list (section 5.2)."""
+    if deflated:
+        note("%d original chunk(s) deflated before base64 (DATA_DEFLATE_BASE64, section 5.2)" % deflated)
+        if version != TABLE_SPEC_VERSION:
+            warn("deflated original chunks in a list of TT_VERSION %s: such a list has TT_VERSION %s (section 5.2)"
+                 % (version or "?", TABLE_SPEC_VERSION))
+    if unknown:
+        warn("%d original chunk(s) with neither DATA_BASE64 nor DATA_DEFLATE_BASE64: a reader leaves them out "
+             "(section 5.2)" % unknown)
+
+
+def original_chunk_sizes(seg_el):
+    """Body sizes of the original chunks of a TT_SEGMENT element (ORIGIN/CHUNK_LIST), the ones that can be read."""
+    sizes = []
+    for c in seg_el.iter("CHUNK"):
+        try:
+            if c.find("DATA_BASE64") is not None:
+                sizes.append(len(base64.b64decode(c.findtext("DATA_BASE64") or "")))
+            elif c.find("DATA_DEFLATE_BASE64") is not None:
+                sizes.append(len(inflate_bounded(base64.b64decode(c.findtext("DATA_DEFLATE_BASE64") or ""))))
+        except Exception:                              # noqa: BLE001 (the validator reports these chunks)
+            continue
+    return sizes
+
+
+def opus_packet_frames(p):
+    """Duration of an Opus packet in 48 kHz frames, from its TOC byte (RFC 6716, section 3.1)."""
+    if not p:
+        return 0
+    config = p[0] >> 3
+    frame = ([480, 960, 1920, 2880][config & 3] if config < 12
+             else ([480, 960][config & 1] if config < 16 else [120, 240, 480, 960][config & 3]))
+    c = p[0] & 3
+    return frame * (1 if c == 0 else ((p[1] & 0x3F if len(p) > 1 else 0) if c == 3 else 2))
+
+
+def vorbis_mode_blockflags(setup):
+    """Block flag (0 short, 1 long) of each mode of a Vorbis setup header, read backwards from its end (as ffmpeg's
+    Vorbis parser does). ValueError when they cannot be found."""
+    rev, total, state = setup[::-1], len(setup) * 8, {"bit": 0}
+
+    def get1():
+        b = state["bit"]
+        state["bit"] = b + 1
+        return (rev[b >> 3] >> (7 - (b & 7))) & 1
+
+    def get(k):
+        v = 0
+        for _ in range(k):
+            v = (v << 1) | get1()
+        return v
+
+    framing = 0
+    while total - state["bit"] > 97:
+        if get1():
+            framing = state["bit"]
+            break
+    if not framing:
+        raise ValueError("Vorbis setup header: framing bit not found")
+    count = last = 0
+    while total - state["bit"] >= 97:
+        if get(8) > 63 or get(16) or get(16):
+            break
+        get1()
+        count += 1
+        if count > 64:
+            break
+        save = state["bit"]
+        if get(6) + 1 == count:
+            last = count
+        state["bit"] = save
+    if not last:
+        raise ValueError("Vorbis setup header: modes not found")
+    state["bit"] = framing
+    flags = [0] * last
+    for i in range(last - 1, -1, -1):
+        state["bit"] += 40
+        flags[i] = get1()
+    return flags
+
+
+def packet_frames(info):
+    """[(first frame, frames)] of every audio packet, counted like START_SAMPLE (Opus: at 48 kHz, the pre-skip removed;
+    Vorbis: (previous block + current block) / 4), set on the granule position of the first page that ends one."""
+    packets, nhead = info["packets"], info["nhead"]
+    audio = packets[nhead:]
+    durs = []
+    if info["codec"] == "opus":
+        durs = [opus_packet_frames(p) for p, _i in audio]
+    else:
+        head = packets[0][0]
+        sizes = [1 << (head[28] & 15), 1 << (head[28] >> 4)]
+        flags = vorbis_mode_blockflags(packets[2][0])
+        bits = max(0, (len(flags) - 1).bit_length())
+        prev = -1
+        for p, _i in audio:
+            mode = ((p[0] >> 1) & ((1 << bits) - 1)) if len(flags) > 1 and p else 0
+            cur = sizes[flags[mode] if mode < len(flags) else 0]
+            durs.append(0 if prev < 0 else (prev + cur) // 4)
+            prev = cur
+    ends, acc = {}, 0
+    for k, (_p, pi) in enumerate(audio):
+        acc += durs[k]
+        ends[pi] = acc
+    origin = 0
+    for pi in sorted(ends):
+        if info["pages"][pi]["granule"] >= 0:
+            origin = info["pages"][pi]["granule"] - ends[pi]
+            break
+    out, pos = [], origin - info["preskip"]
+    for d in durs:
+        out.append((pos, d))
+        pos += d
+    return out
+
+
+def empty_shell(info):
+    """Bytes of the same stream with no comment and no audio: identification header, comment header with the vendor
+    string only, setup header (Vorbis), on the fewest pages. What every separate file pays once (section 12.1)."""
+    packets = info["packets"]
+    heads = [build_ogg_comments(info["magic"], info["vendor"], [])] + ([packets[2][0]] if info["codec"] == "vorbis" else [])
+    size = 27 + len(ogg_lacing(len(packets[0][0]))) + len(packets[0][0])
+    for _ht, _g, lacing, body in paginate_headers(heads):
+        size += 27 + len(lacing) + len(body)
+    return size
+
+
+def reference_tags(pairs):
+    """Bytes of the values of a segment as the comments of a separate Ogg file (section 12.1): 4 + name + 1 + value for
+    each value but the four structural ones, empty values left out; the XML cell counts as one value named XML."""
+    total = 0
+    for path, value in pairs:
+        if path in STRUCTURAL or value == "":
+            continue
+        total += 4 + len(path.rpartition("/")[2].encode("utf-8")) + 1 + len(value.encode("utf-8"))
+    return total
+
+
+def _covered_frames(ranges):
+    total, end = 0, -1
+    for a, n in sorted(ranges):
+        b = a + n
+        if b > end:
+            total += b - max(a, end)
+            end = b
+    return total
+
+
+def ogg_weight(info, listel):
+    """Reference weight of an Ogg TT file (section 12.1) -> (bytes, bytes of audio that belong to no segment)."""
+    audio = info["packets"][info["nhead"]:]
+    frames = packet_frames(info)
+    shell = empty_shell(info)
+    audio_pages = len(info["pages"]) - info["packets"][info["nhead"] - 1][1] - 1
+    per_page = max(1.0, len(audio) / max(1, audio_pages))
+    starts = [f[0] for f in frames]
+    covered, ref = [0.0] * len(audio), 0.0
+    for s in listel.findall("TT_SEGMENT"):
+        try:
+            a = int(s.findtext("START_SAMPLE"))
+            b = a + int(s.findtext("LENGTH_SAMPLES"))
+        except (TypeError, ValueError):
+            continue
+        k = max(0, bisect.bisect_right(starts, a) - 1)
+        nbytes = count = 0.0
+        while k < len(audio) and frames[k][0] < b:
+            pa, pd = frames[k]
+            if pd > 0:
+                share = max(0, min(b, pa + pd) - max(a, pa)) / pd
+                nbytes += (len(audio[k][0]) + len(audio[k][0]) // 255 + 1) * share
+                count += share
+                covered[k] = min(1.0, covered[k] + share)
+            k += 1
+        ref += shell + reference_tags(segment_pairs(s)) + nbytes + 27 * max(1, math.ceil(count / per_page - 1e-9))
+    outside = sum((len(p) + len(p) // 255 + 1) * (1.0 - cv) for (p, _i), cv, (_s, d) in zip(audio, covered, frames) if d > 0)
+    return ref, outside
+
+
+def wav_weight(by, listel, ixml_version):
+    """Reference weight of a WAV TT file (section 12.1) -> (bytes, bytes of audio that belong to no segment)."""
+    fmt = by["fmt "]["body"]
+    align = max(1, struct.unpack("<H", fmt[12:14])[0])
+    fmt_chunk_bytes = 8 + len(fmt) + (len(fmt) & 1)
+    bext_bytes = (8 + len(by["bext"]["body"]) + (len(by["bext"]["body"]) & 1)) if "bext" in by else 0
+    frame = len(('<?xml version="1.0" encoding="UTF-8"?><BWFXML><IXML_VERSION>%s</IXML_VERSION></BWFXML>'
+                 % ixml_version).encode("utf-8"))
+    ref, ranges = 0, []
+    for s in listel.findall("TT_SEGMENT"):
+        try:
+            start, length = int(s.findtext("START_SAMPLE")), int(s.findtext("LENGTH_SAMPLES"))
+        except (TypeError, ValueError):
+            continue
+        ranges.append((start, length))
+        originals = original_chunk_sizes(s)
+        if originals:
+            meta = sum(8 + n + (n & 1) for n in originals)
+        else:
+            body = frame + sum(len(_xml_text(e).encode("utf-8")) for e in s if e.tag in ("USER", "ASWG", "FIELD_LIST"))
+            meta = bext_bytes + 8 + body + (body & 1)
+        data = length * align
+        ref += 12 + fmt_chunk_bytes + meta + 8 + data + (data & 1)
+    return ref, len(by["data"]["body"]) - _covered_frames(ranges) * align
+
+
+def weight_line(size, ref, outside):
+    """The weight report of a validator (section 12.2)."""
+    diff = size - ref
+    return ("weight (section 12): file %d bytes, reference weight %.0f bytes (each segment as a separate file): %s by "
+            "%.0f bytes (%+.2f %%); audio that belongs to no segment: %.0f bytes"
+            % (size, ref, "heavier" if diff > 0 else "lighter", abs(diff), 100.0 * diff / ref if ref else 0.0, outside))
+
+
+def edge_list():
+    """A list with what the columns of a table cannot express (self-check of section 11.5): elements of a program at
+    list level, characters to escape, an empty value, a "/" in a field name, a deflated original chunk, a repeated
+    element, a repeated field name, two USER blocks, a FIELD with a third child, an element with an attribute, a block
+    of a program. The non-ASCII name is written with chr(): the source of the kit stays ASCII."""
+    name = "Porte " + chr(0xAB) + " grin" + chr(0xE7) + "ante " + chr(0xBB) + " 01 " + chr(0x95E8)
+    seg = ("<TT_SEGMENT><SEGMENT_ID>0b6f6a52-3f0e-4c8e-9d1a-1a2b3c4d5e0%d</SEGMENT_ID><CUE_ID>%d</CUE_ID>"
+           "<START_SAMPLE>%d</START_SAMPLE><LENGTH_SAMPLES>100</LENGTH_SAMPLES><NAME>%s</NAME>%s</TT_SEGMENT>")
+    return ("<TT_SEGMENT_LIST><TT_VERSION>0.3</TT_VERSION><SAMPLE_RATE>48000</SAMPLE_RATE><TOTAL_FRAMES>400</TOTAL_FRAMES>"
+            "<SEGMENT_COUNT>4</SEGMENT_COUNT><ACME_SESSION><TAKE>4</TAKE><MIC>MKH416</MIC></ACME_SESSION>"
+            "<ACME_NOTE>kept</ACME_NOTE>"
+            + seg % (1, 1, 0, xml_escape(name),
+                     "<USER><CATID>DOORWood</CATID><FXNAME>Say \"hi\" \\ &amp; &lt;go&gt; 'x'</FXNAME><KEYWORDS></KEYWORDS>"
+                     "<LIBRARY>Lib</LIBRARY></USER><FIELD_LIST><FIELD><NAME>a/b</NAME><VALUE>line 1\nline 2\ttab  </VALUE>"
+                     "</FIELD></FIELD_LIST><ORIGIN><FILENAME>door.wav</FILENAME><CHUNK_LIST><CHUNK><CHUNK_ID>bext</CHUNK_ID>"
+                     "<DATA_DEFLATE_BASE64>" + SRC_BEXT_DEFLATED + "</DATA_DEFLATE_BASE64></CHUNK></CHUNK_LIST></ORIGIN>")
+            + seg % (2, 2, 100, "B", "<ACME_TAG>one</ACME_TAG><ACME_TAG>two</ACME_TAG><USER><CATID>DOORWood</CATID>"
+                     "<LIBRARY>Lib</LIBRARY></USER><FIELD_LIST><FIELD><NAME>dup</NAME><VALUE>1</VALUE></FIELD><FIELD>"
+                     "<NAME>dup</NAME><VALUE>2</VALUE></FIELD></FIELD_LIST>")
+            + seg % (3, 0, 200, "C", "<USER><CATID>DOORWood</CATID></USER><USER><FXNAME>second USER block</FXNAME></USER>"
+                     "<FIELD_LIST><FIELD><NAME>x</NAME><VALUE>y</VALUE><LANG>fr</LANG></FIELD></FIELD_LIST>")
+            + seg % (4, 3, 300, "D", "<ACME_LANE kind=\"voice\">2</ACME_LANE><ACME_BLOCK><P>1</P><Q>2</Q></ACME_BLOCK>"
+                     "<USER><CATID>DOORWood</CATID><LIBRARY>Lib</LIBRARY></USER><STATUS>proposed</STATUS>"
+                     "<CONFIDENCE>0.8</CONFIDENCE>")
+            + "</TT_SEGMENT_LIST>")
+
+
 def describe_ogg(data):
     info = read_ogg(data)
     cm = comment_map(info["comments"])
-    text = cm["TT_SEGMENT_LIST"][0]
+    key, values = ogg_list_of(cm)
+    text = values[0]
     return dict(kind="ogg", codec=info["codec"], rate=info["rate"], channels=info["channels"],
                 preskip=info["preskip"], frames=info["total"], audio_sha256=info["audio_sha256"],
                 headers_sha256=info["headers_sha256"], comment_keys=sorted(cm),
-                summary={k: cm[k][0] for k in OGG_SUMMARY_KEYS if k in cm}, chapters=ogg_chapters(cm),
-                list_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(), list=canon_list(ET.fromstring(text)))
+                summary={k: cm[k][0] for k in OGG_SUMMARY_KEYS if k in cm}, chapters=ogg_chapters(cm), list_key=key,
+                list_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(), list=canon_list(ogg_list_element(key, text)))
 
 
 def check_ogg_bytes(data, entry, title):
@@ -1214,16 +1841,21 @@ def check_ogg_bytes(data, entry, title):
                      "chapter", rep)
         rep.set("chapters", "CHANGED")
 
-    found_list, values = None, cm.get("TT_SEGMENT_LIST", [])
+    key = entry.get("list_key", LIST_KEY)                # TT_SEGMENT_LIST, or TT_SEGMENT_TABLE (draft 0.3)
+    other = TABLE_KEY if key == LIST_KEY else LIST_KEY
+    found_list, values = None, cm.get(key, [])
     if not values:
-        rep.set("list", "LOST")
+        if cm.get(other):
+            rep.set("list", "CHANGED", "the list is now a %s comment" % other)
+        else:
+            rep.set("list", "LOST")
     elif len(values) > 1:
-        rep.set("list", "CHANGED", "%d TT_SEGMENT_LIST comments" % len(values))
+        rep.set("list", "CHANGED", "%d %s comments" % (len(values), key))
     else:
         try:
-            found_list = canon_list(ET.fromstring(values[0]))
-        except ET.ParseError as e:
-            rep.set("list", "CHANGED", "the list no longer parses: %s" % e)
+            found_list = canon_list(ogg_list_element(key, values[0]))
+        except (ET.ParseError, ValueError) as e:
+            rep.set("list", "CHANGED", "the list no longer reads: %s" % e)
         else:
             if hashlib.sha256(values[0].encode("utf-8")).hexdigest() == entry["list_sha256"]:
                 rep.set("list", "OK")
@@ -1241,7 +1873,7 @@ def check_ogg_bytes(data, entry, title):
         for s in found_list["segments"]:
             cid, start = s.get("CUE_ID#0", ""), s.get("START_SAMPLE#0", "")
             ch = chapters.get("%03d" % int(cid)) if cid.isdigit() and cid != "0" else None
-            if ch and start.isdigit() and ch[0] != chapter_time(int(start), info["rate"]):
+            if ch and start.isdigit() and not chapter_at(ch[0], int(start), info["rate"], 1):   # reader rule: 1 ms
                 moved += 1
         if moved:
             rep.info("spec check: %d segment(s) whose chapter is not at START_SAMPLE (moved by a program)" % moved)
@@ -1277,6 +1909,9 @@ def validate_ogg(path, data):
     """Spec checks for an Ogg TT file (section 11). 0 = no FAIL."""
     lines, counts = [], {"fail": 0, "warn": 0}
 
+    def note(msg):                                       # information only: neither a failure nor a warning
+        lines.append("[INFO] " + msg)
+
     def ok(msg):
         lines.append("[OK]   " + msg)
 
@@ -1309,28 +1944,50 @@ def validate_ogg(path, data):
     if info["unfinished"]:
         warn("the stream ends in the middle of a packet")
     cm = comment_map(info["comments"])
-    values = cm.get("TT_SEGMENT_LIST", [])
-    if not values:
-        bad("no TT_SEGMENT_LIST comment")
+    lists, tables = cm.get(LIST_KEY, []), cm.get(TABLE_KEY, [])
+    if not lists and not tables:
+        bad("no TT_SEGMENT_LIST or TT_SEGMENT_TABLE comment")
         return finish()
+    if lists and tables:
+        bad("both TT_SEGMENT_LIST and TT_SEGMENT_TABLE: a file holds one form; the checks below read TT_SEGMENT_LIST, "
+            "as a reader does (section 11.5)")
+    form = LIST_KEY if lists else TABLE_KEY
+    values = lists or tables
     if len(values) > 1:
-        bad("%d TT_SEGMENT_LIST comments (at most one, section 11.2)" % len(values))
+        bad("%d %s comments (at most one, sections 11.2 and 11.5)" % (len(values), form))
     if "\n" in values[0] or "\r" in values[0]:
-        warn("the TT_SEGMENT_LIST value has line breaks (it SHOULD be one line, section 11.2)")
-    try:
-        listel = ET.fromstring(values[0])
-    except ET.ParseError as e:
-        bad("the TT_SEGMENT_LIST value does not parse: %s" % e)
-        return finish()
-    if listel.tag != "TT_SEGMENT_LIST":
-        bad("the TT_SEGMENT_LIST value is a <%s> element" % listel.tag)
-        return finish()
+        warn("the %s value has line breaks (it SHOULD be one line, sections 11.2 and 11.5)" % form)
+    if form == TABLE_KEY:
+        problems = []
+        try:
+            theader, tsegs = table_model(values[0], problems)
+            listel = ET.fromstring(list_xml(theader, tsegs))
+        except (ValueError, ET.ParseError) as e:
+            bad("the TT_SEGMENT_TABLE value cannot be read as a segment table: %s (section 11.5)" % e)
+            return finish()
+        for p in problems:
+            bad("segment table: %s (section 11.5)" % p)
+        if not problems:
+            tobj = json.loads(values[0])
+            ok("segment table: %d columns, %d value(s) shared by every segment, %s" % (
+                len(tobj["COLUMNS"]), len(tobj.get("DEFAULTS", {})), "ORDER given" if "ORDER" in tobj else "no ORDER"))
+    else:
+        try:
+            listel = ET.fromstring(values[0])
+        except ET.ParseError as e:
+            bad("the TT_SEGMENT_LIST value does not parse: %s" % e)
+            return finish()
+        if listel.tag != "TT_SEGMENT_LIST":
+            bad("the TT_SEGMENT_LIST value is a <%s> element" % listel.tag)
+            return finish()
     canon = canon_list(listel)
     h, segs = canon["header"], canon["segments"]
     version = h.get("TT_VERSION", "")
     if not version:
         bad("TT_VERSION missing")
-    elif version != OGG_SPEC_VERSION:
+    elif form == TABLE_KEY and version != TABLE_SPEC_VERSION:
+        warn("TT_VERSION %s: a file with a segment table has TT_VERSION %s (section 11.5)" % (version, TABLE_SPEC_VERSION))
+    elif version not in (OGG_SPEC_VERSION, TABLE_SPEC_VERSION):
         warn("TT_VERSION %s (Ogg files are defined from draft %s)" % (version, OGG_SPEC_VERSION))
     else:
         ok("TT_VERSION " + version)
@@ -1350,6 +2007,7 @@ def validate_ogg(path, data):
 
     chapters = ogg_chapters(cm)
     seen, prev, broken = set(), -1, 0
+    deflated = unknown_chunks = 0
     for i, s in enumerate(segs, 1):
         sid, problems = s.get("SEGMENT_ID#0", ""), []
         if not sid:
@@ -1380,29 +2038,60 @@ def validate_ogg(path, data):
             if ch is None:
                 problems.append("chapter %03d missing" % int(cid))
             else:
-                if ch[0] != chapter_time(start, rate):
+                at = chapter_at(ch[0], start, rate)
+                if at is None:
+                    problems.append("chapter %03d time %s is not HH:MM:SS.mmm" % (int(cid), ch[0][:24]))
+                elif not at:
                     problems.append("chapter %03d at %s, START_SAMPLE is %s" % (int(cid), ch[0], chapter_time(start, rate)))
                 if not ch[1]:
                     problems.append("chapter %03d has no NAME" % int(cid))
-        for key, value in s.items():
-            if key.endswith("DATA_BASE64#0"):
-                try:
-                    base64.b64decode(value, validate=True)
-                except Exception:                          # noqa: BLE001 (report, do not stop)
-                    problems.append("an ORIGIN chunk is not valid base64")
+        chunk_problems, nd, nu = origin_chunks(s)
+        problems += chunk_problems
+        deflated += nd
+        unknown_chunks += nu
         if problems:
             broken += 1
             bad("segment %d (%s): %s" % (i, sid[:13], "; ".join(problems)))
     if broken == 0:
         ok("%d segment(s): ids, ranges, names and chapters" % len(segs))
-    if len(chapters) > 999 or any(len(k) != 3 for k in chapters):
+    check_chunk_forms(version, deflated, unknown_chunks, warn, note)
+    unchaptered = sum(1 for s in segs if s.get("CUE_ID#0") == "0")
+    if unchaptered:
+        note("%d segment(s) without a chapter (CUE_ID 0): only programs that read the list see them (section 11.2)"
+             % unchaptered)
+    longer = sorted((k for k in chapters if len(k) > 3), key=int)
+    if longer:
+        bad("chapter numbers of more than three digits, from CHAPTER%s: ffmpeg reads three digits only, so "
+            "CHAPTER%sNAME renames chapter %s (section 11.2)" % (longer[0], longer[0], longer[0][:3]))
+    if any(len(k) < 3 for k in chapters):
         warn("chapter numbers SHOULD have three digits, 001 to 999 (section 11.2)")
+    if info["codec"] == "opus":                          # RFC 7845, section 5.2: comments past 61,440 octets
+        parts, nchap, end = [], 0, len(info["magic"]) + 4 + len(info["vendor"]) + 4
+        for c in info["comments"]:
+            end += 4 + len(c.encode("utf-8"))
+            key = c.partition("=")[0].upper()
+            if end <= 61440:
+                continue
+            if is_chapter_key(key):
+                nchap += 1
+                if nchap == 1:
+                    parts.append(None)                   # where the chapters start
+            else:
+                parts.append(key)
+        if parts:
+            note("beyond the first 61,440 octets of the comment header, which RFC 7845 (section 5.2) lets Opus programs "
+                 "ignore: %s (section 11.4)" % ", ".join(("%d chapter comment(s)" % nchap) if p is None else p for p in parts))
     desc = (cm.get("DESCRIPTION") or cm.get("COMMENT") or [""])[0]
     missing = [s.get("USER#0/FXNAME#0") for s in segs if s.get("USER#0/FXNAME#0") and s.get("USER#0/FXNAME#0") not in desc]
     if missing:
         warn("the DESCRIPTION comment does not name %d segment(s) (sections 7 and 11.2), first: %s" % (len(missing), missing[0]))
     elif segs:
         ok("the DESCRIPTION comment names every segment")
+    try:
+        ref, outside = ogg_weight(info, listel)
+        note(weight_line(len(data), ref, outside))
+    except (ValueError, IndexError, ZeroDivisionError) as e:
+        note("weight (section 12): not computed (%s)" % e)
     return finish()
 
 
@@ -1453,13 +2142,18 @@ def check_file(path, as_name=None):
 # Validator: the rules of the specification on ANY TT file (not only the samples)
 # ---------------------------------------------------------------------------------------------
 
-def validate_file(path):
-    """Spec checks: structure, list header, segments, mirrored markers, audio hash, summary. 0 = no FAIL."""
-    with open(path, "rb") as f:
-        data = f.read()
+def validate_file(path, data=None):
+    """Spec checks: structure, list header, segments, mirrored markers, audio hash, summary, weight. 0 = no FAIL.
+    `data`: the bytes of the file when they are already in memory (self-check)."""
+    if data is None:
+        with open(path, "rb") as f:
+            data = f.read()
     if data[:4] == b"OggS":
         return validate_ogg(path, data)
     lines, counts = [], {"fail": 0, "warn": 0}
+
+    def note(msg):                                       # information only: neither a failure nor a warning
+        lines.append("[INFO] " + msg)
 
     def ok(msg):
         lines.append("[OK]   " + msg)
@@ -1529,6 +2223,7 @@ def validate_file(path):
     cue = read_cue(by["cue "]["body"]) if "cue " in by else {}
     labels, notes, ltxts, order = read_adtl(by["LIST/adtl"]["body"]) if "LIST/adtl" in by else ({}, {}, {}, [])
     seen, prev, broken, no_ltxt, non_ascii = set(), -1, 0, 0, 0
+    deflated = unknown_chunks = 0
     for i, s in enumerate(segs, 1):
         sid = s.get("SEGMENT_ID#0", "")
         problems = []
@@ -1569,17 +2264,16 @@ def validate_file(path):
                 no_ltxt += 1
             elif ltxts[cid] != length:
                 problems.append("ltxt length %d, LENGTH_SAMPLES %d" % (ltxts[cid], length))
-        for key, value in s.items():
-            if key.endswith("DATA_BASE64#0"):
-                try:
-                    base64.b64decode(value, validate=True)
-                except Exception:                          # noqa: BLE001 (report, do not stop)
-                    problems.append("an ORIGIN chunk is not valid base64")
+        chunk_problems, nd, nu = origin_chunks(s)
+        problems += chunk_problems
+        deflated += nd
+        unknown_chunks += nu
         if problems:
             broken += 1
             bad("segment %d (%s): %s" % (i, sid[:13], "; ".join(problems)))
     if broken == 0:
         ok("%d segment(s): ids, ranges, names and mirrored markers" % len(segs))
+    check_chunk_forms(version, deflated, unknown_chunks, warn, note)
     if no_ltxt:
         warn("%d segment(s) with a cue point but no ltxt length (section 6)" % no_ltxt)
     if non_ascii:
@@ -1605,6 +2299,11 @@ def validate_file(path):
         d = by["bext"]["body"][:256].split(b"\x00")[0]
         if any(b > 127 for b in d):
             warn("the bext Description is not ASCII (EBU Tech 3285, section 7)")
+    try:
+        ref, outside = wav_weight(by, listel, root.findtext("IXML_VERSION") or "2.10")
+        note(weight_line(len(data), ref, outside))
+    except (ValueError, IndexError, struct.error, ZeroDivisionError) as e:
+        note("weight (section 12): not computed (%s)" % e)
     return finish()
 
 
@@ -1649,6 +2348,36 @@ def generate(use_ffprobe=True):
         man["files"][name] = describe_ogg(data)
         ogg_files[name] = (data, ftotal if key == "full" else mtotal)
         log.append("written %s: %d bytes, %d segments" % (name, len(data), len(segs)))
+    # draft 0.3: two of them again with the list as a segment table (section 11.5), the original chunk deflated
+    # (section 5.2), audio and other comments unchanged
+    known = {src_bext_body(fsegs[0]): SRC_BEXT_DEFLATED}
+    if inflate_bounded(base64.b64decode(SRC_BEXT_DEFLATED)) != src_bext_body(fsegs[0]):
+        failures += 1
+        log.append("SRC_BEXT_DEFLATED does not inflate to the bext of the source of segment 1   <-- FAILED")
+    for name, src in TABLE_SAMPLES:
+        if src not in ogg_files:
+            failures += 1
+            log.append("%s not written: %s is missing   <-- FAILED" % (name, src))
+            continue
+        base, comments, sizes = ogg_files[src][0], [], (0, 0)
+        for c in read_ogg(base)["comments"]:
+            if c.startswith(LIST_KEY + "="):
+                listel = ET.fromstring(c.partition("=")[2])
+                listel.find("TT_VERSION").text = TABLE_SPEC_VERSION
+                listel.find("WRITER").text = TABLE_WRITER
+                deflate_origin_chunks(listel, known)
+                header, segments = list_model(listel)
+                table = TABLE_KEY + "=" + table_text(header, segments)
+                sizes = (len(c.encode("utf-8")), len(table.encode("utf-8")))
+                c = table
+            comments.append(c)
+        data = ogg_with_comments(base, comments)
+        with open(os.path.join(OUT_DIR, name), "wb") as f:
+            f.write(data)
+        man["files"][name] = describe_ogg(data)
+        ogg_files[name] = (data, ogg_files[src][1])
+        log.append("written %s: %d bytes, the list of %s (%d bytes) as a table of %d bytes" % (name, len(data), src,
+                                                                                            sizes[0], sizes[1]))
     with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(man, f, ensure_ascii=False, indent=1)
 
@@ -1664,7 +2393,7 @@ def generate(use_ffprobe=True):
                 log.append("   " + line.strip())
                 failures += 1
 
-    # 1b. every sample passes the validator (the rules of the specification)
+    # 1b. every sample passes the validator (the rules of the specification), which reports its weight (section 12)
     for name in files:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1672,6 +2401,9 @@ def generate(use_ffprobe=True):
         result = [l for l in buf.getvalue().splitlines() if l.startswith("RESULT")]
         log.append("validate %s: %s" % (name, result[0] if result else "no result"))
         failures += 0 if code == 0 and result and "0 warning" in result[0] else 1
+        weight = [l for l in buf.getvalue().splitlines() if "weight (section 12): file" in l]
+        log.append("   " + (weight[0][7:] if weight else "no weight line   <-- FAILED"))
+        failures += 0 if weight else 1
 
     # 2. the checker sees every kind of rewrite (mutations of the full file)
     entry = man["files"][FULL]
@@ -1748,6 +2480,9 @@ def generate(use_ffprobe=True):
         result = [l for l in buf.getvalue().splitlines() if l.startswith("RESULT")]
         log.append("validate %s: %s" % (name, result[0] if result else "no result"))
         failures += 0 if code == 0 and result and "0 warning" in result[0] else 1
+        weight = [l for l in buf.getvalue().splitlines() if "weight (section 12): file" in l]
+        log.append("   " + (weight[0][7:] if weight else "no weight line   <-- FAILED"))
+        failures += 0 if weight else 1
         frames = man["files"][name]["frames"]
         failures += 0 if frames == model_total else 1
         log.append("decoded length %s: %d frames, %d in the WAV sample %s" % (name, frames, model_total,
@@ -1783,9 +2518,27 @@ def generate(use_ffprobe=True):
             if label == "one audio byte changed" and not any("AUDIO_SHA256 no longer matches" in l for l in rep.lines):
                 failures += 1
                 log.append("   FAILED: the AUDIO_SHA256 rule did not fire")
+        # the validator's chapter rules (section 11.2): a start exactly on a half millisecond (24 frames at 48 kHz)
+        # rounded either way, a chapter 1 ms off, a chapter number of four digits
+        for label, data, want in (
+                ("half ms, chapter rounded up", ogg_moved_segment(base, 24, "00:00:00.501"), "PASS"),
+                ("half ms, chapter rounded to even", ogg_moved_segment(base, 24), "PASS"),
+                ("chapter 1 ms after its start", ogg_moved_segment(base, 0, "00:00:00.501"), "FAIL"),
+                ("chapter number of four digits", ogg_with_comments(base, comments + [
+                    "CHAPTER1000=00:00:06.000", "CHAPTER1000NAME=Four digits"]), "FAIL")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                validate_ogg(label, data)
+            result = [l for l in buf.getvalue().splitlines() if l.startswith("RESULT")]
+            ok = bool(result) and result[0].startswith("RESULT " + want)
+            failures += 0 if ok else 1
+            log.append("ogg validator %-33s %s %s" % (label + ":", "OK" if ok else "FAILED", "" if ok else result))
     for name, checks in ((OGG_FULL, (("ogg_file", ["COMMENT", "DESCRIPTION", "KEYWORDS"]), ("ogg_chapter", None),
                                      ("ogg_list", ["TT_SEGMENT_LIST"]))),
-                         (OGG_MANY, (("ogg_many_list", ["TT_SEGMENT_LIST"]), ("ogg_many_chap", None)))):
+                         (OGG_MANY, (("ogg_many_list", ["TT_SEGMENT_LIST"]), ("ogg_many_chap", None))),
+                         (OPUS_FULL_TABLE, (("ogg_file", ["COMMENT", "DESCRIPTION", "KEYWORDS"]), ("ogg_chapter", None),
+                                            ("ogg_list", [TABLE_KEY]))),
+                         (OGG_MANY_TABLE, (("ogg_many_list", [TABLE_KEY]), ("ogg_many_chap", None)))):
         if name not in ogg_files:
             continue
         cm = comment_map(read_ogg(ogg_files[name][0])["comments"])
@@ -1797,6 +2550,90 @@ def generate(use_ffprobe=True):
                 ok = holders == expect
             failures += 0 if ok else 1
             log.append("search word %-15s in %s %s" % (TOKENS[token_key], ", ".join(holders), "OK" if ok else "FAILED"))
+
+    # 4b. draft 0.3: a list written as a table and read back is the same list, element by element and in order (a
+    # list of edge cases: every element and value); the validator's rules on tables and on deflated chunks
+    def canon_el(e, ordered=True):
+        kids = [canon_el(k, ordered) for k in e]
+        if not ordered:
+            kids.sort()
+        return (e.tag, tuple(sorted(e.attrib.items())), (e.text or "") if len(e) == 0 else "", tuple(kids))
+
+    def round_trip(listel, ordered=True):
+        header, segments = list_model(listel)
+        back = ET.fromstring(list_xml(*table_model(table_text(header, segments))))
+        segs_of = lambda r: [canon_el(x, ordered) for x in r.findall("TT_SEGMENT")]          # noqa: E731
+        others = lambda r: sorted(canon_el(x, False) for x in r if x.tag != "TT_SEGMENT")    # noqa: E731
+        return segs_of(listel) == segs_of(back) and others(listel) == others(back)
+
+    lists = []
+    for name in files:
+        _form, wchunks = parse_riff(files[name][0])
+        root, _err, _parts, _lst = ixml_parts(next(c for c in wchunks if c["key"] == "iXML")["body"])
+        lists.append((name, find_list(root)))
+    for name, *_rest in OGG_SAMPLES:
+        if name in ogg_files:
+            lists.append((name, ET.fromstring(comment_map(read_ogg(ogg_files[name][0])["comments"])[LIST_KEY][0])))
+    for label, listel, ordered in [(n, l, True) for n, l in lists] + [("edge cases", ET.fromstring(edge_list()), False)]:
+        ok = round_trip(listel, ordered)
+        failures += 0 if ok else 1
+        log.append("table round trip %-19s %s" % (label + ":", "OK" if ok else "FAILED"))
+    cases = []
+    if OPUS_FULL_TABLE in ogg_files and OPUS_FULL in ogg_files:
+        tbase = ogg_files[OPUS_FULL_TABLE][0]
+        tcomments = read_ogg(tbase)["comments"]
+        tvalue = comment_map(tcomments)[TABLE_KEY][0]
+        xml_value = comment_map(read_ogg(ogg_files[OPUS_FULL][0])["comments"])[LIST_KEY][0]
+        tobj = json.loads(tvalue)
+        fewer = json.dumps(dict(tobj, ROWS=tobj["ROWS"][:-1]), ensure_ascii=False, separators=(",", ":"))
+        k = 40
+        damaged = tvalue.replace(SRC_BEXT_DEFLATED, SRC_BEXT_DEFLATED[:k] + ("A" if SRC_BEXT_DEFLATED[k] != "A" else "B")
+                                 + SRC_BEXT_DEFLATED[k + 1:])
+
+        def with_table(value):
+            return ogg_with_comments(tbase, [(TABLE_KEY + "=" + value) if c.startswith(TABLE_KEY + "=") else c
+                                             for c in tcomments])
+        cases += [("table and list in one file", ogg_with_comments(tbase, tcomments + [LIST_KEY + "=" + xml_value]), "FAIL"),
+                  ("table with a row missing", with_table(fewer), "FAIL"),
+                  ("table, deflated chunk damaged", with_table(damaged), "FAIL"),
+                  ("table of TT_VERSION 0.2", with_table(tvalue.replace('"TT_VERSION":"0.3"', '"TT_VERSION":"0.2"')),
+                   "PASS (0 fail, 2 warning)")]
+    src_b64 = base64.b64encode(src_bext_body(fsegs[0])).decode("ascii")
+
+    def wav_with_ixml(transform):
+        _form, wch = parse_riff(files[FULL][0])
+        before, after, pcm_, seen = b"", b"", b"", False
+        for c in wch:
+            if c["id"] == b"data":
+                pcm_, seen = c["body"], True
+                continue
+            raw = chunk(c["id"], transform(c["body"]) if c["id"] == b"iXML" else c["body"])
+            if seen:
+                after += raw
+            else:
+                before += raw
+        return wav_bytes(before, pcm_, after)
+    deflate_xml = lambda b: b.replace(("<DATA_BASE64>%s</DATA_BASE64>" % src_b64).encode("ascii"),         # noqa: E731
+                                      ("<DATA_DEFLATE_BASE64>%s</DATA_DEFLATE_BASE64>" % SRC_BEXT_DEFLATED).encode("ascii"))
+    cases += [("WAV, deflated chunk, TT_VERSION 0.3",
+               wav_with_ixml(lambda b: deflate_xml(b).replace(b"<TT_VERSION>0.1<", b"<TT_VERSION>0.3<")),
+               "PASS (0 fail, 0 warning)"),
+              ("WAV, deflated chunk, TT_VERSION 0.1", wav_with_ixml(deflate_xml), "PASS (0 fail, 1 warning)")]
+    for label, data, want in cases:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            validate_file(label, data)
+        result = [l for l in buf.getvalue().splitlines() if l.startswith("RESULT")]
+        ok = bool(result) and result[0].startswith("RESULT " + want)
+        failures += 0 if ok else 1
+        log.append("validator %-37s %s %s" % (label + ":", "OK" if ok else "FAILED", "" if ok else result))
+    try:
+        inflate_bounded(zlib.compress(b"\x00" * 2000), limit=1000)
+        ok = False
+    except ValueError:
+        ok = True
+    failures += 0 if ok else 1
+    log.append("a deflated chunk that inflates beyond the limit is refused: %s" % ("OK" if ok else "FAILED"))
 
     # 5. optional: ffprobe reads the markers as chapters
     probe = shutil.which("ffprobe") if use_ffprobe else None
@@ -1820,7 +2657,7 @@ def generate(use_ffprobe=True):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="TT File Format v0.2 sample files and checker (stdlib).")
+    ap = argparse.ArgumentParser(description="TT File Format v0.3 sample files and checker (stdlib).")
     ap.add_argument("--check", metavar="FILE", help="compare a copy that went through another program")
     ap.add_argument("--validate", metavar="FILE", help="check any TT file against the rules of the specification")
     ap.add_argument("--as", dest="as_name", metavar="NAME", help="sample name of the file when it was renamed")
