@@ -380,7 +380,10 @@ element once, and a value that every segment shares once.
 | `XML` | every other child of `TT_SEGMENT`, whole, as XML text, one after the other: an element with attributes or deeper children (an `ORIGIN` with a `CHUNK_LIST`), every occurrence of a repeated element (two `USER` blocks, two elements of a program with the same name), a `FIELD_LIST` that the row above cannot express. An element written here is not written in other columns. |
 
 Converting an XML list to a table and back gives every element of every segment, with the same text; with `ORDER`,
-in the same order (the elements of an `XML` cell come back together, where the first of them was). A program that
+in the same order when the segments share one order of their elements, as the segments one program writes do (the
+elements of an `XML` cell come back together, where the first of them was). `ORDER` is one order for all the
+segments: segments that order their elements otherwise come back in it, and the table written again from them can
+differ from the first without losing anything; further conversions keep it. A program that
 converts the file to WAV, or splits it, reads the same segments from either form. Sections 8 and 11.3 apply: a
 rewriter MUST copy the comment unchanged, with the members and the paths it does not know. The kit's
 `--validate` reads both forms; `kit/samples/tt_v0_full_table.opus` and `tt_v0_many_table.ogg` are written this way.

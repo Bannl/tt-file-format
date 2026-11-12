@@ -1,5 +1,14 @@
 # Changelog
 
+## Draft 0.3, amended (2026-11-12)
+
+- Section 11.5: a table keeps the order of the elements of the segments when they share one order, as the segments
+  one program writes do. `ORDER` is one order for all the segments: segments that order their elements otherwise
+  come back in it, and the table written again from them can differ from the first without losing anything;
+  further conversions keep it. The text promised the same order in every case with `ORDER`; a list whose segments
+  order their elements differently shows it does not hold there (found by AudioCrucible's self-test, the kit
+  behaves the same).
+
 ## Draft 0.3 (2026-11-12)
 
 From a study of the weight of TT files against the same sounds as separate files with the same metadata
